@@ -1,0 +1,30 @@
+{
+  "expo": {
+    "name": "Traductor Live",
+    "slug": "traductor-live",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "scheme": "traductor-live",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true,
+      "deploymentTarget": "26.0",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "Traductor Live usa el micrófono para traducir tu voz en tiempo real.",
+        "NSSpeechRecognitionUsageDescription": "Traductor Live usa reconocimiento de voz en el dispositivo para transcribir tu predicación sin conexión a internet."
+      },
+      "bundleIdentifier": "com.traductor.live"
+    },
+    "android": {
+      "permissions": [
+        "RECORD_AUDIO",
+        "MODIFY_AUDIO_SETTINGS"
+      ],
+      "package": "com.traductor.live"
+    },
+    "plugins": [
+      "expo-dev-client",
+      "expo-status-bar"
+    ]
+  }
+}

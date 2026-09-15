@@ -1,0 +1,29 @@
+{
+  "name": "@traductor/mobile",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.js",
+  "scripts": {
+    "start": "expo start --dev-client",
+    "ios": "expo run:ios",
+    "android": "expo run:android",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@traductor/shared": "0.1.0",
+    "offline-pipeline": "file:./modules/offline-pipeline",
+    "expo": "~57.0.22",
+    "expo-modules-core": "~57.0.18",
+    "expo-dev-client": "~57.0.19",
+    "expo-status-bar": "~57.0.1",
+    "lucide-react-native": "^1.17.0",
+    "react": "19.2.3",
+    "react-native": "0.86.3",
+    "react-native-svg": "15.15.4"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.1",
+    "typescript": "~6.0.3"
+  }
+}

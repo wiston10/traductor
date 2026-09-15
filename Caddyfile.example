@@ -1,0 +1,26 @@
+# Reemplaza api.tudominio.com por tu dominio real que apunte al VPS
+api.tudominio.com {
+    # Manejo automático de certificados SSL/TLS con Let's Encrypt
+    encode zstd gzip
+
+    # Proxy reverso hacia el contenedor Fastify API
+    reverse_proxy api:3000 {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+
+    # Security Headers recomendados para API
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+
+    log {
+        output stdout
+        format console
+    }
+}
