@@ -1,10 +1,78 @@
-node_modules
+# ============================================================
+#  Traductor — archivos que NO deben ir a git
+#  Las rutas que empiezan por "/" solo aplican a esa carpeta
+#  exacta (así no se ignora código propio por error).
+# ============================================================
+
+# --- Dependencias -------------------------------------------
+node_modules/
+
+# --- Secretos y configuración local --------------------------
 .env
-.env.local
-.expo
-dist
-build
-coverage
+.env.*
+!.env.example
+*.pem
+*.key
+*.p8
+*.p12
+*.jks
+*.keystore
+*.mobileprovision
+
+# --- Salidas de compilación ----------------------------------
+/apps/api/dist/
+/apps/mobile/dist/
+/apps/mobile/web-build/
+/packages/*/dist/
+*.tsbuildinfo
+coverage/
+
+# --- Expo / React Native -------------------------------------
+.expo/
+expo-env.d.ts
+.metro-health-check*
+*.jsbundle
+# Carpetas nativas generadas por `npx expo prebuild` (se regeneran).
+# OJO: solo estas dos; el código nativo propio está en
+# apps/mobile/modules/offline-pipeline/ios y SÍ se guarda.
+/apps/mobile/ios/
+/apps/mobile/android/
+
+# --- Xcode / CocoaPods (por si se abre algún proyecto nativo) -
+xcuserdata/
+DerivedData/
+*.xcuserstate
+Pods/
+
+# --- Python (servidor Whisper) -------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# --- Modelos y audio (pesados; se descargan o se generan) ----
+*.bin
+*.gguf
+*.onnx
+*.safetensors
+*.mlmodelc/
+/models/
+/apps/whisper-server/models/
+/apps/whisper-server/training-data/
+*.wav
+*.mp3
+*.m4a
+
+# --- Logs ----------------------------------------------------
 *.log
-ios
-android
+npm-debug.log*
+yarn-error.log*
+
+# --- Sistema y editores --------------------------------------
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.orig
