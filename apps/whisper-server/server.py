@@ -1,0 +1,320 @@
+#!/usr/bin/env python3
+"""
+Servidor local de reconocimiento de voz para suizo alemán.
+
+Recibe audio PCM 16 kHz (int16, mono) desde la página web por WebSocket,
+lo transcribe con un modelo Whisper ajustado para suizo alemán (que escribe
+en alemán estándar) y devuelve texto provisional ("partial") y definitivo
+("final"). La traducción la sigue haciendo el navegador.
+
+Todo corre en este ordenador: gratis, sin claves y sin enviar audio a nadie.
+
+Uso:
+    python3 server.py                       # http://localhost:8765
+    python3 server.py --model <modelo HF>   # otro modelo
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import logging
+import time
+from pathlib import Path
+
+import numpy as np
+from aiohttp import WSMsgType, web
+
+SAMPLE_RATE = 16000
+FRAME = 480  # 30 ms
+
+log = logging.getLogger("whisper-server")
+
+
+# ---------------------------------------------------------------------------
+# Modelo
+# ---------------------------------------------------------------------------
+class Transcriber:
+    def __init__(self, model_id: str, device: str | None, language: str):
+        import torch
+        from transformers import pipeline
+
+        if device is None:
+            if torch.backends.mps.is_available():
+                device = "mps"
+            elif torch.cuda.is_available():
+                device = "cuda"
+            else:
+                device = "cpu"
+        dtype = torch.float16 if device in ("mps", "cuda") else torch.float32
+        log.info("Cargando %s en %s (%s)… la primera vez se descarga (~1,6 GB)", model_id, device, dtype)
+        self.pipe = pipeline(
+            "automatic-speech-recognition",
+            model=model_id,
+            torch_dtype=dtype,
+            device=device,
+        )
+        self.language = language
+        self.lock = asyncio.Lock()
+        # Calentamiento: la primera inferencia siempre es lenta
+        self._run(np.zeros(SAMPLE_RATE, dtype=np.float32))
+        t0 = time.monotonic()
+        self._run(np.zeros(5 * SAMPLE_RATE, dtype=np.float32))
+        log.info("Modelo listo en %s. Un paso tarda ~%.2fs (ideal: menos de 1s).", device, time.monotonic() - t0)
+
+    def _run(self, audio: np.ndarray) -> str:
+        out = self.pipe(
+            {"raw": audio, "sampling_rate": SAMPLE_RATE},
+            generate_kwargs={
+                "language": self.language,
+                "task": "transcribe",
+                "num_beams": 1,          # búsqueda simple: mucho más rápida
+                "do_sample": False,
+                "max_new_tokens": 160,   # una frase de pocos segundos no necesita más
+            },
+        )
+        return (out.get("text") or "").strip()
+
+    async def transcribe(self, audio: np.ndarray) -> str:
+        async with self.lock:  # un solo modelo: una inferencia a la vez
+            return await asyncio.to_thread(self._run, audio)
+
+
+# ---------------------------------------------------------------------------
+# Segmentación del audio en directo
+# ---------------------------------------------------------------------------
+# Frases típicas que Whisper "alucina" sobre silencio o música
+HALLUCINATIONS = {
+    "untertitel im auftrag des zdf",
+    "untertitel der amara.org-community",
+    "vielen dank fürs zuschauen",
+    "danke fürs zuschauen",
+    "copyright wdr",
+    "swr 2020",
+}
+
+
+def is_hallucination(text: str) -> bool:
+    t = text.lower().strip(" .!?…")
+    return not t or any(h in t for h in HALLUCINATIONS)
+
+
+class Segmenter:
+    """
+    Acumula audio y decide cuándo transcribir:
+      - cada `partial_every` s: texto provisional del segmento actual
+      - tras `silence` s de pausa: cierra la frase (texto definitivo)
+      - si nadie hace pausa (predicador rápido): corta como máximo a `max_seg` s,
+        en el punto más silencioso de los últimos segundos, para no partir palabras.
+    """
+
+    def __init__(self, partial_every: float, silence: float, max_seg: float):
+        self.partial_every = partial_every
+        self.silence = silence
+        self.max_seg = max_seg
+        self.buf = np.zeros(0, dtype=np.float32)
+        self.noise = 0.004       # nivel de ruido de fondo (se adapta)
+        self.last_partial = 0.0
+        self.last_partial_text = ""
+        self.last_partial_len = 0
+        self.step_cost = 0.0     # cuánto tardó el último paso (s)
+
+    def note_cost(self, seconds: float) -> None:
+        # media móvil del tiempo de inferencia
+        self.step_cost = seconds if self.step_cost == 0 else 0.7 * self.step_cost + 0.3 * seconds
+
+    def add(self, pcm: bytes) -> None:
+        samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+        self.buf = np.concatenate([self.buf, samples])
+
+    @property
+    def seconds(self) -> float:
+        return len(self.buf) / SAMPLE_RATE
+
+    def _frame_rms(self) -> np.ndarray:
+        n = len(self.buf) // FRAME
+        if n == 0:
+            return np.zeros(0)
+        frames = self.buf[: n * FRAME].reshape(n, FRAME)
+        return np.sqrt((frames ** 2).mean(axis=1) + 1e-12)
+
+    def decide(self, now: float):
+        """Devuelve ("final", audio) | ("partial", audio) | (None, None)."""
+        rms = self._frame_rms()
+        if len(rms) == 0:
+            return None, None
+        # Ruido de fondo adaptativo: percentil bajo de la energía reciente
+        self.noise = 0.95 * self.noise + 0.05 * float(np.percentile(rms[-100:], 10))
+        threshold = max(0.008, self.noise * 3.0)
+        speech = rms > threshold
+
+        if not speech.any():
+            # Solo silencio: no acumular indefinidamente
+            if self.seconds > 2.0:
+                self.buf = self.buf[-int(0.3 * SAMPLE_RATE):]
+            return None, None
+
+        # Silencio al final
+        trailing = 0
+        for v in speech[::-1]:
+            if v:
+                break
+            trailing += 1
+        trailing_s = trailing * FRAME / SAMPLE_RATE
+
+        if trailing_s >= self.silence:
+            return "final", self._cut(len(self.buf))
+
+        if self.seconds >= self.max_seg:
+            # Cortar en el marco más silencioso de los últimos 2 s
+            window = int(2.0 * SAMPLE_RATE / FRAME)
+            start = max(0, len(rms) - window)
+            cut_frame = start + int(np.argmin(rms[start:]))
+            return "final", self._cut(max(cut_frame, 1) * FRAME)
+
+        # Intervalo adaptativo: nunca pedir parciales más rápido de lo que el Mac
+        # puede procesarlos (deja hueco para que los finales no esperen).
+        interval = max(self.partial_every, self.step_cost * 1.5)
+        grown = len(self.buf) - self.last_partial_len >= int(0.4 * SAMPLE_RATE)
+        if now - self.last_partial >= interval and self.seconds >= 0.6 and grown:
+            self.last_partial = now
+            self.last_partial_len = len(self.buf)
+            return "partial", self.buf.copy()
+
+        return None, None
+
+    def _cut(self, n: int) -> np.ndarray:
+        audio, self.buf = self.buf[:n], self.buf[n:]
+        self.last_partial = 0.0
+        self.last_partial_len = 0
+        self.last_partial_text = ""
+        return audio
+
+
+# ---------------------------------------------------------------------------
+# Servidor web + WebSocket
+# ---------------------------------------------------------------------------
+async def ws_handler(request: web.Request) -> web.WebSocketResponse:
+    app = request.app
+    transcriber: Transcriber = app["transcriber"]
+    args = app["args"]
+    ws = web.WebSocketResponse(max_msg_size=4 * 1024 * 1024)
+    await ws.prepare(request)
+    log.info("Cliente conectado")
+
+    seg = Segmenter(args.partial_every, args.silence, args.max_seg)
+    closed = asyncio.Event()
+
+    async def send(kind: str, text: str, level: str | None = None) -> None:
+        if not ws.closed:
+            msg = {"type": kind, "text": text}
+            if level:
+                msg["level"] = level
+            await ws.send_str(json.dumps(msg, ensure_ascii=False))
+
+    async def worker() -> None:
+        await send("status", "Escuchando (Whisper local)")
+        while not closed.is_set():
+            await asyncio.sleep(0.15)
+            kind, audio = seg.decide(time.monotonic())
+            if kind is None:
+                continue
+            # Si el modelo está ocupado, un parcial se salta; un final espera.
+            if kind == "partial" and transcriber.lock.locked():
+                continue
+            t0 = time.monotonic()
+            try:
+                text = await transcriber.transcribe(audio)
+            except Exception as exc:  # noqa: BLE001
+                log.exception("Error al transcribir")
+                await send("status", f"Error: {exc}")
+                continue
+            took = time.monotonic() - t0
+            seg.note_cost(took)
+            log.debug("%s %.1fs audio en %.2fs: %s", kind, len(audio) / SAMPLE_RATE, took, text)
+            if is_hallucination(text):
+                if kind == "final":
+                    await send("partial", "")
+                continue
+            if kind == "final":
+                await send("final", text)
+            elif text != seg.last_partial_text:
+                seg.last_partial_text = text
+                await send("partial", text)
+            # Aviso solo si el Mac va lento de forma sostenida
+            if seg.step_cost > 2.5:
+                await send("status", f"Whisper va lento ({seg.step_cost:.1f}s por paso)", "warn")
+            elif kind == "final":
+                await send("status", f"Escuchando · {seg.step_cost:.1f}s por paso", "live")
+
+    task = asyncio.create_task(worker())
+    try:
+        async for msg in ws:
+            if msg.type == WSMsgType.BINARY:
+                seg.add(msg.data)
+            elif msg.type == WSMsgType.ERROR:
+                break
+    finally:
+        closed.set()
+        # Lo que quedaba pendiente se transcribe como frase final
+        if seg.seconds > 0.5 and not ws.closed:
+            try:
+                text = await transcriber.transcribe(seg.buf)
+                if not is_hallucination(text):
+                    await send("final", text)
+            except Exception:  # noqa: BLE001
+                pass
+        task.cancel()
+        log.info("Cliente desconectado")
+    return ws
+
+
+async def index(request: web.Request) -> web.StreamResponse:
+    page = request.app["web_dir"] / "index.html"
+    if page.exists():
+        return web.FileResponse(page)
+    return web.Response(text="Servidor Whisper activo. Abre la página web del apuntador.")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Servidor Whisper local para suizo alemán")
+    parser.add_argument("--model", default="Flurin17/whisper-large-v3-turbo-swiss-german",
+                        help="Modelo de Hugging Face (por defecto: Whisper turbo ajustado a suizo alemán)")
+    parser.add_argument("--language", default="de", help="Idioma de salida de Whisper (de = alemán estándar)")
+    parser.add_argument("--device", default=None, help="mps | cuda | cpu (por defecto, el mejor disponible)")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--partial-every", type=float, default=1.0,
+                        help="Segundos entre textos provisionales (más bajo = más rápido, más carga)")
+    parser.add_argument("--silence", type=float, default=0.5,
+                        help="Pausa (s) que cierra una frase")
+    parser.add_argument("--max-seg", type=float, default=6.0,
+                        help="Duración máxima (s) de un segmento si el predicador no hace pausas")
+    parser.add_argument("--verbose", action="store_true")
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
+                        format="%(asctime)s %(levelname)s %(message)s")
+    # Silenciar mensajes técnicos que no son errores (descargas, avisos de transformers)
+    for noisy in ("httpx", "huggingface_hub", "urllib3"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+    try:
+        from transformers.utils import logging as hf_logging
+        hf_logging.set_verbosity_error()
+    except Exception:  # noqa: BLE001
+        pass
+
+    app = web.Application()
+    app["args"] = args
+    app["web_dir"] = (Path(__file__).resolve().parent.parent / "web")
+    app["transcriber"] = Transcriber(args.model, args.device, args.language)
+    app.router.add_get("/", index)
+    app.router.add_get("/ws", ws_handler)
+    app.router.add_static("/static", app["web_dir"], show_index=False)
+
+    log.info("Abre http://%s:%d en Chrome", "localhost" if args.host == "127.0.0.1" else args.host, args.port)
+    web.run_app(app, host=args.host, port=args.port, print=None)
+
+
+if __name__ == "__main__":
+    main()

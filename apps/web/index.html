@@ -1,0 +1,920 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apuntador de interpretación</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --line: #262a33; --text: #f2f2f2;
+    --muted: #8a8f98; --accent: #4ea1ff; --warn: #ffb020; --err: #ff5c5c; --ok: #3ddc84;
+    --fs: 44px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  body { display: flex; flex-direction: column; }
+  header { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 12px;
+    background: var(--panel); border-bottom: 1px solid var(--line); }
+  header select, header button, #settings input[type=number] {
+    font: inherit; font-size: 15px; background: #222632; color: var(--text);
+    border: 1px solid #333847; border-radius: 8px; padding: 6px 10px; }
+  button { cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  #toggle { background: var(--accent); border-color: var(--accent); color: #000; font-weight: 700; min-width: 120px; }
+  #toggle.running { background: var(--err); border-color: var(--err); }
+  #status { margin-left: auto; font-size: 14px; color: var(--muted); white-space: nowrap; }
+  #status .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+    background: var(--muted); margin-right: 6px; vertical-align: middle; }
+  #status.live .dot { background: var(--ok); }
+  #status.warn .dot { background: var(--warn); }
+  #status.err .dot { background: var(--err); }
+  #banner { display: none; padding: 10px 16px; background: #3a2a00; color: #ffd27a; font-size: 14px; }
+  #banner.show { display: block; }
+  #settings { display: none; padding: 12px 16px; background: var(--panel); border-bottom: 1px solid var(--line); font-size: 14px; }
+  #settings.open { display: block; }
+  #settings textarea { width: 100%; min-height: 160px; font: 14px ui-monospace, Menlo, monospace;
+    background: #11141a; color: var(--text); border: 1px solid #333847; border-radius: 8px; padding: 8px; }
+  #settings label { display: inline-flex; gap: 6px; align-items: center; margin-right: 18px; }
+  .hint { color: var(--muted); margin: 6px 0; }
+  main { flex: 1; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+  #source { flex: 0 0 auto; max-height: 24vh; overflow: hidden; padding: 10px 18px;
+    color: var(--muted); font-size: calc(var(--fs) * 0.45); line-height: 1.35;
+    border-bottom: 1px solid var(--line); display: flex; flex-direction: column; justify-content: flex-end; }
+  #source .now { color: #c9ccd2; }
+  #targetWrap { flex: 1; position: relative; min-height: 0; display: flex; }
+  #target { flex: 1; min-width: 0; overflow-y: auto; padding: 0 22px; font-size: var(--fs); line-height: 1.35; }
+  #target::before { content: ""; display: block; height: var(--pad-top, 16px); }
+  #target::after { content: ""; display: block; height: var(--pad-bottom, 60vh); }
+  .seg.now { color: #fff; }
+  .w-cur { background: rgba(78,161,255,.28); border-radius: 4px; box-shadow: 0 0 0 2px rgba(78,161,255,.28); }
+  /* Línea guía de lectura */
+  #guide { position: absolute; left: 0; right: 0; top: var(--guide, 45%); height: 0; pointer-events: none;
+    border-top: 3px solid rgba(255,176,32,.85); z-index: 2; }
+  #guide.hidden { display: none; }
+  #guide::before { content: ""; position: absolute; left: 0; right: 0; top: calc(-1 * var(--fs) * 1.45);
+    height: calc(var(--fs) * 1.45); background: rgba(255,176,32,.07); }
+  #guideHandle { position: absolute; right: 6px; top: -14px; width: 28px; height: 28px; border-radius: 50%;
+    background: var(--warn); color: #000; font-size: 16px; line-height: 28px; text-align: center;
+    pointer-events: auto; cursor: ns-resize; user-select: none; }
+  #readbar { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; padding: 6px 12px;
+    background: var(--panel); border-bottom: 1px solid var(--line); font-size: 14px; }
+  #readbar input[type=range] { width: 160px; vertical-align: middle; }
+  #readbar label { display: inline-flex; gap: 6px; align-items: center; }
+  #readbar button { font: inherit; background: #222632; color: var(--text); border: 1px solid #333847;
+    border-radius: 8px; padding: 4px 10px; }
+  #catchup.behind { background: var(--warn); border-color: var(--warn); color: #000; font-weight: 600; }
+  .seg { margin: 0 0 .35em; }
+  .seg.old { opacity: .5; }
+  .seg.pending { color: var(--muted); font-style: italic; }
+  .interim { color: var(--muted); }
+  .empty { color: var(--muted); font-size: 22px; }
+  #linkbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 12px;
+    background: var(--panel); border-bottom: 1px solid var(--line); font-size: 14px; }
+  #linkbar input[type=url] { flex: 1; min-width: 240px; font: inherit; background: #11141a; color: var(--text);
+    border: 1px solid #333847; border-radius: 8px; padding: 6px 10px; }
+  #linkbar select, #linkbar button { font: inherit; background: #222632; color: var(--text);
+    border: 1px solid #333847; border-radius: 8px; padding: 6px 10px; }
+  #layout { flex: 1; display: flex; min-height: 0; }
+  #videoPane { display: none; flex: 0 0 var(--video-w, 45%); background: #000; border-right: 1px solid var(--line);
+    flex-direction: column; min-width: 200px; }
+  #layout.with-video #videoPane { display: flex; }
+  #videoPane iframe { flex: 1; width: 100%; border: 0; }
+  #videoPane .hint { padding: 6px 10px; font-size: 12px; margin: 0; }
+  #splitter { display: none; flex: 0 0 6px; cursor: col-resize; background: var(--line); }
+  #layout.with-video #splitter { display: block; }
+  @media (max-width: 800px) {
+    #layout.with-video { flex-direction: column; }
+    #videoPane { flex: 0 0 35vh; border-right: 0; border-bottom: 1px solid var(--line); }
+    #layout.with-video #splitter { display: none; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <select id="srcLang" title="Idioma del predicador"></select>
+  <button id="swap" title="Invertir idiomas">⇄</button>
+  <select id="tgtLang" title="Idioma de la traducción"></select>
+  <button id="toggle">▶ Empezar</button>
+  <button id="clear" title="Borrar pantalla">Borrar</button>
+  <button id="smaller" title="Letra más pequeña">A−</button>
+  <button id="bigger" title="Letra más grande">A+</button>
+  <button id="fullscreen" title="Pantalla completa">⛶</button>
+  <button id="export" title="Descargar transcripción">Descargar</button>
+  <button id="openSettings">Ajustes</button>
+  <span id="status"><span class="dot"></span><span id="statusText">Listo</span></span>
+</header>
+<div id="banner"></div>
+<section id="settings">
+  <div class="hint"><b>Glosario</b>: una línea por término, con el formato <code>original = traducción</code>.
+    Se aplica antes de traducir para que los términos clave siempre salgan igual. Las líneas que empiezan por # se ignoran.</div>
+  <textarea id="glossary" spellcheck="false"></textarea>
+  <p>
+    <label><input type="checkbox" id="liveInterim" checked> Traducir mientras habla (más rápido; el texto gris puede cambiar)</label>
+    <label>Cada <input type="number" id="interimMs" min="150" max="3000" step="50" style="width:80px"> ms</label>
+  </p>
+  <p>
+    <label>Servidor Whisper: <input type="text" id="whisperUrl" style="width:280px;font:inherit;background:#11141a;color:var(--text);border:1px solid #333847;border-radius:8px;padding:4px 8px"></label>
+    <span class="hint">Arráncalo con <code>python3 apps/whisper-server/server.py</code> (ver README).</span>
+  </p>
+</section>
+<div id="linkbar">
+  <input type="url" id="streamUrl" placeholder="Enlace de la transmisión en vivo (YouTube u otro) — opcional">
+  <button id="openStream">Mostrar al lado</button>
+  <button id="closeStream" title="Quitar el video">✕</button>
+  <label for="engine">Voz:</label>
+  <select id="engine" title="Motor de reconocimiento de voz">
+    <option value="chrome">Chrome (alemán estándar, nube de Google)</option>
+    <option value="whisper">Whisper suizo-alemán (este ordenador)</option>
+  </select>
+  <label for="audioSource">Audio:</label>
+  <select id="audioSource">
+    <option value="tab">De la transmisión (esta pestaña)</option>
+    <option value="mic">Micrófono</option>
+  </select>
+</div>
+<div id="readbar">
+  <label title="A qué ritmo aparece el texto traducido">Lectura:
+    <input type="range" id="readWpm" min="60" max="420" step="10">
+    <b id="readWpmLabel"></b></label>
+  <label title="Si te quedas atrás, el texto acelera un poco hasta alcanzar el directo">
+    <input type="checkbox" id="autoCatch"> Acelerar si me retraso</label>
+  <label><input type="checkbox" id="guideOn"> Línea guía</label>
+  <label title="Altura de la línea guía">Altura:
+    <input type="range" id="guidePos" min="15" max="85" step="1" style="width:110px"></label>
+  <button id="catchup" title="Mostrar de golpe todo lo pendiente">Al día</button>
+</div>
+<div id="layout">
+  <div id="videoPane">
+    <iframe id="videoFrame" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe>
+    <p class="hint">Si el video no carga, esa página no permite mostrarse dentro de otra: ábrela en otra pestaña y elige esa pestaña al compartir el audio.</p>
+  </div>
+  <div id="splitter" title="Arrastra para cambiar el tamaño"></div>
+  <main>
+    <div id="source"></div>
+    <div id="targetWrap">
+      <div id="target"><p class="empty">Pega el enlace de la transmisión (opcional), pulsa «Empezar» y la traducción aparecerá aquí en tiempo real.</p></div>
+      <div id="guide"><div id="guideHandle" title="Arrastra para mover la línea">↕</div></div>
+    </div>
+  </main>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  // [código Translator API, nombre, código de reconocimiento de voz]
+  const LANGS = [
+    ["de", "Alemán", "de-DE"], ["de-CH", "Alemán (Suiza)", "de-CH"],
+    ["fr", "Francés", "fr-FR"], ["fr-CH", "Francés (Suiza)", "fr-CH"],
+    ["en", "Inglés", "en-US"], ["en-GB", "Inglés (Reino Unido)", "en-GB"],
+    ["es", "Español", "es-ES"], ["it", "Italiano", "it-IT"], ["pt", "Portugués", "pt-BR"]
+  ];
+  const speechCode = (code) => (LANGS.find((l) => l[0] === code) || [code, code, code])[2];
+  // Código para el traductor: «de-CH» se traduce como alemán
+  const trCode = (code) => code.split("-")[0];
+
+  const DEFAULT_GLOSSARY = [
+    "# alemán = español (añade aquí los términos de tu iglesia)",
+    "Heiliger Geist = Espíritu Santo",
+    "Heiligen Geist = Espíritu Santo",
+    "Heiligen Geistes = Espíritu Santo",
+    "Abendmahl = Santa Cena",
+    "Herr Jesus = Señor Jesús",
+    "Jesus Christus = Jesucristo",
+    "Gemeinde = iglesia",
+    "Gnade = gracia",
+    "Sünde = pecado",
+    "Sünden = pecados",
+    "Erlösung = redención",
+    "Evangelium = evangelio"
+  ].join("\n");
+
+  // ---------- almacenamiento local (puede fallar en algunos contextos) ----------
+  const store = {
+    get(key, fallback) { try { const v = localStorage.getItem(key); return v === null ? fallback : v; } catch { return fallback; } },
+    set(key, value) { try { localStorage.setItem(key, value); } catch { /* sin almacenamiento */ } }
+  };
+
+  const $ = (id) => document.getElementById(id);
+  const el = {
+    src: $("srcLang"), tgt: $("tgtLang"), swap: $("swap"), toggle: $("toggle"), clear: $("clear"),
+    smaller: $("smaller"), bigger: $("bigger"), fullscreen: $("fullscreen"), exportBtn: $("export"),
+    openSettings: $("openSettings"), settings: $("settings"), glossary: $("glossary"),
+    liveInterim: $("liveInterim"), interimMs: $("interimMs"),
+    status: $("status"), statusText: $("statusText"), banner: $("banner"),
+    source: $("source"), target: $("target"),
+    streamUrl: $("streamUrl"), openStream: $("openStream"), closeStream: $("closeStream"),
+    readWpm: $("readWpm"), readWpmLabel: $("readWpmLabel"), autoCatch: $("autoCatch"),
+    guideOn: $("guideOn"), guidePos: $("guidePos"), guide: $("guide"), guideHandle: $("guideHandle"),
+    catchup: $("catchup"),
+    audioSource: $("audioSource"), engine: $("engine"), whisperUrl: $("whisperUrl"), layout: $("layout"), videoFrame: $("videoFrame"), splitter: $("splitter")
+  };
+  el.audioSource.value = store.get("audioSource", "tab");
+  el.streamUrl.value = store.get("streamUrl", "");
+  el.engine.value = store.get("engine", "chrome");
+  el.readWpm.value = store.get("readWpm", "170");
+  el.autoCatch.checked = store.get("autoCatch", "1") === "1";
+  el.guideOn.checked = store.get("guideOn", "1") === "1";
+  el.guidePos.value = store.get("guidePos", "45");
+  const DEFAULT_WS = location.protocol.startsWith("http") && location.port === "8765"
+    ? `ws://${location.host}/ws` : "ws://localhost:8765/ws";
+  el.whisperUrl.value = store.get("whisperUrl", DEFAULT_WS);
+
+  for (const [code, name] of LANGS) {
+    el.src.add(new Option(name, code));
+    el.tgt.add(new Option(name, code));
+  }
+  el.src.value = store.get("srcLang", "de");
+  el.tgt.value = store.get("tgtLang", "es");
+  el.glossary.value = store.get("glossary", DEFAULT_GLOSSARY);
+  el.liveInterim.checked = store.get("liveInterim", "1") === "1";
+  el.interimMs.value = store.get("interimMs", "400");
+  let fontSize = Number(store.get("fontSize", "44")) || 44;
+  document.documentElement.style.setProperty("--fs", fontSize + "px");
+
+  // ---------- estado ----------
+  const state = {
+    running: false,
+    recog: null,
+    translator: null,
+    translatorKey: "",
+    segments: [],        // { src, tgt, time } finalizados, en orden
+    interimSrc: "",
+    interimTgt: "",
+    generation: 0,       // aumenta con cada frase final; descarta traducciones provisionales viejas
+    interimBusy: false,
+    interimAgain: false,
+    interimTimer: null,
+    wakeLock: null,
+    lastNetworkError: 0,
+    audioStream: null,   // captura del audio (pestaña o micrófono)
+    audioTrack: null,
+    readSeg: 0,          // segmento que se está mostrando
+    readWord: 0,         // palabras ya mostradas de ese segmento
+    readBudget: 0,       // palabras "acumuladas" por el reloj de lectura
+    readPauseUntil: 0,   // pausa breve al final de cada frase
+    userScrollUntil: 0,  // el usuario movió el texto a mano: no forzar el desplazamiento
+    ws: null,            // conexión con el servidor Whisper
+    audioCtx: null
+  };
+
+  // ---------- utilidades de interfaz ----------
+  function setStatus(kind, text) {
+    el.status.className = kind;
+    el.statusText.textContent = text;
+  }
+  function showBanner(text) {
+    el.banner.textContent = text;
+    el.banner.classList.toggle("show", Boolean(text));
+  }
+  const escapeHtml = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+  let renderQueued = false;
+  const UNLIMITED = 420;   // el tope del deslizador = sin límite
+  const wordsOf = (seg) => seg.words || (seg.tgt === null ? null : (seg.words = seg.tgt.split(/\s+/).filter(Boolean)));
+
+  function backlogWords() {
+    let n = 0;
+    for (let i = state.readSeg; i < state.segments.length; i++) {
+      const w = wordsOf(state.segments[i]);
+      if (!w) break;                       // se espera a que llegue esa traducción, en orden
+      n += i === state.readSeg ? w.length - state.readWord : w.length;
+    }
+    return n;
+  }
+  function caughtUp() { return backlogWords() === 0; }
+
+  // Muestra la siguiente palabra disponible; false si no hay nada listo
+  function revealNextWord(now) {
+    while (state.readSeg < state.segments.length) {
+      const w = wordsOf(state.segments[state.readSeg]);
+      if (!w) return false;
+      if (state.readWord < w.length) {
+        const word = w[state.readWord++];
+        if (/[.!?…:;]$/.test(word)) state.readPauseUntil = now + 350;      // respirar al final de frase
+        else if (/,$/.test(word)) state.readPauseUntil = now + 120;
+        if (state.readWord >= w.length) state.readPauseUntil = Math.max(state.readPauseUntil, now + 250);
+        return true;
+      }
+      state.readSeg++; state.readWord = 0;
+    }
+    return false;
+  }
+
+  let lastTick = performance.now();
+  function readingTick(now) {
+    const dt = Math.min(250, now - lastTick);
+    lastTick = now;
+    const wpm = Number(el.readWpm.value);
+    let changed = false;
+    if (wpm >= UNLIMITED) {
+      while (revealNextWord(now)) changed = true;
+    } else if (now >= state.readPauseUntil) {
+      const backlog = backlogWords();
+      let rate = wpm;
+      // Si se acumula demasiado, acelerar suavemente (hasta 2,5×) para no perder el directo
+      if (el.autoCatch.checked && backlog > 25) rate = wpm * Math.min(2.5, 1 + (backlog - 25) / 40);
+      state.readBudget += (rate / 60) * (dt / 1000);
+      while (state.readBudget >= 1 && now >= state.readPauseUntil) {
+        if (!revealNextWord(now)) { state.readBudget = Math.min(state.readBudget, 1); break; }
+        state.readBudget -= 1; changed = true;
+      }
+    }
+    const backlog = backlogWords();
+    el.catchup.textContent = backlog > 0 ? `Al día (${backlog})` : "Al día";
+    el.catchup.classList.toggle("behind", backlog > 40);
+    if (changed) render();
+    smoothScroll();
+    requestAnimationFrame(readingTick);
+  }
+  requestAnimationFrame(readingTick);
+
+  function render() {
+    if (renderQueued) return;
+    renderQueued = true;
+    requestAnimationFrame(() => {
+      renderQueued = false;
+
+      // Panel superior: lo que se está diciendo en el idioma original (sin retraso)
+      const lastSrc = state.segments.slice(-2).map((s) => escapeHtml(s.src));
+      const nowSrc = state.interimSrc ? `<span class="now">${escapeHtml(state.interimSrc)}</span>` : "";
+      el.source.innerHTML = [...lastSrc.map((t) => `<div>${t}</div>`), nowSrc ? `<div>${nowSrc}</div>` : ""].join("");
+
+      // Panel principal: traducción al ritmo de lectura
+      const html = [];
+      const first = Math.max(0, state.readSeg - 30);
+      for (let i = first; i <= state.readSeg && i < state.segments.length; i++) {
+        const seg = state.segments[i];
+        const w = wordsOf(seg);
+        const isCurrent = i === state.readSeg || (i === state.readSeg - 1 && state.readWord === 0);
+        const cls = "seg" + (isCurrent ? " now" : i < state.readSeg - 2 ? " old" : "");
+        if (i < state.readSeg) {
+          html.push(`<p class="${cls}">${escapeHtml(seg.tgt)}</p>`);
+        } else if (w && state.readWord > 0) {
+          const shown = w.slice(0, state.readWord).map(escapeHtml);
+          shown[shown.length - 1] = `<span class="w-cur">${shown[shown.length - 1]}</span>`;
+          html.push(`<p class="${cls}">${shown.join(" ")}</p>`);
+        }
+      }
+      // Texto provisional (gris) solo cuando el lector va al día
+      const sameLang = trCode(el.src.value) === trCode(el.tgt.value);
+      const interimText = sameLang ? state.interimSrc : state.interimTgt;
+      if (interimText && caughtUp()) html.push(`<p class="seg interim">${escapeHtml(interimText)}</p>`);
+      if (html.length || state.segments.length) el.target.innerHTML = html.join("");
+    });
+  }
+
+  // Altura del espaciador inferior (para no dejar el texto pegado abajo sin línea guía)
+  const h0 = (e) => parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--pad-bottom")) - e.target.clientHeight * 0.3;
+  // Desplazamiento suave: la palabra actual se coloca justo sobre la línea guía
+  function smoothScroll() {
+    if (performance.now() < state.userScrollUntil) return;
+    const cur = el.target.querySelector(".w-cur") || el.target.querySelector(".seg.now:last-of-type") ||
+      el.target.lastElementChild;
+    if (!cur) return;
+    const guideY = el.target.clientHeight * (Number(el.guidePos.value) / 100);
+    const lineH = parseFloat(getComputedStyle(el.target).fontSize) * 1.35;
+    if (!el.guideOn.checked) {      // sin línea guía: seguir el final del texto
+      const want = el.target.scrollHeight - el.target.clientHeight - (h0(el) || 0);
+      el.target.scrollTop += (Math.max(0, want) - el.target.scrollTop) * 0.12;
+      return;
+    }
+    const curTop = cur.getBoundingClientRect().top - el.target.getBoundingClientRect().top + el.target.scrollTop;
+    const curBottom = cur.classList.contains("w-cur")
+      ? curTop + lineH
+      : curTop + cur.getBoundingClientRect().height;
+    const want = Math.max(0, curBottom - guideY);
+    const diff = want - el.target.scrollTop;
+    if (Math.abs(diff) < 1) return;
+    el.target.scrollTop += diff * 0.12;    // se acerca poco a poco: sin saltos bruscos
+  }
+  for (const ev of ["wheel", "touchmove"]) {
+    el.target.addEventListener(ev, () => { state.userScrollUntil = performance.now() + 6000; }, { passive: true });
+  }
+
+  // ---------- glosario ----------
+  let glossaryRules = [];
+  function parseGlossary() {
+    glossaryRules = el.glossary.value.split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith("#") && line.includes("="))
+      .map((line) => {
+        const idx = line.indexOf("=");
+        return [line.slice(0, idx).trim(), line.slice(idx + 1).trim()];
+      })
+      .filter(([a, b]) => a && b)
+      .sort((x, y) => y[0].length - x[0].length)
+      .map(([a, b]) => {
+        const escaped = a.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        return [new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, "giu"), b];
+      });
+  }
+  const applyGlossary = (text) => glossaryRules.reduce((t, [re, rep]) => t.replace(re, rep), text);
+
+  // ---------- traductor en el dispositivo (Chrome Translator API) ----------
+  async function ensureTranslator() {
+    const sourceLanguage = trCode(el.src.value), targetLanguage = trCode(el.tgt.value);
+    if (sourceLanguage === targetLanguage) { state.translator = null; return; }
+    const key = sourceLanguage + ">" + targetLanguage;
+    if (state.translator && state.translatorKey === key) return;
+    state.translator = null;
+
+    if (!("Translator" in self)) {
+      showBanner("Este navegador no tiene el traductor integrado. Usa Google Chrome 138 o posterior (o Edge 148+) en un ordenador. Mientras tanto se mostrará solo la transcripción.");
+      return;
+    }
+    const opts = { sourceLanguage, targetLanguage };
+    const availability = await Translator.availability(opts);
+    if (availability === "unavailable") {
+      showBanner(`El traductor integrado no admite ${sourceLanguage} → ${targetLanguage} en este equipo. Se mostrará solo la transcripción.`);
+      return;
+    }
+    setStatus("warn", availability === "available" ? "Preparando traductor…" : "Descargando modelo de traducción…");
+    state.translator = await Translator.create({
+      ...opts,
+      monitor(m) {
+        m.addEventListener("downloadprogress", (e) => setStatus("warn", `Descargando modelo: ${Math.round(e.loaded * 100)}%`));
+      }
+    });
+    state.translatorKey = key;
+  }
+
+  async function translate(text) {
+    if (!state.translator) return null;
+    return state.translator.translate(applyGlossary(text));
+  }
+
+  // Traducción del texto provisional: una petición a la vez, siempre con lo más reciente
+  function scheduleInterim() {
+    if (!el.liveInterim.checked || !state.translator) return;
+    if (state.interimTimer) return;
+    const delay = Math.max(150, Number(el.interimMs.value) || 400);
+    state.interimTimer = setTimeout(() => { state.interimTimer = null; translateInterim(); }, delay);
+  }
+  async function translateInterim() {
+    if (!state.interimSrc) { state.interimTgt = ""; render(); return; }
+    if (state.interimBusy) { state.interimAgain = true; return; }
+    state.interimBusy = true;
+    const gen = state.generation;
+    try {
+      const out = await translate(state.interimSrc);
+      if (gen === state.generation && state.interimSrc) { state.interimTgt = out || ""; render(); }
+    } catch { /* se reintenta con el siguiente texto */ }
+    state.interimBusy = false;
+    if (state.interimAgain) { state.interimAgain = false; scheduleInterim(); }
+  }
+
+  function commitFinal(text) {
+    const src = text.trim();
+    if (!src) return;
+    state.generation++;
+    const seg = { src, tgt: state.translator ? null : src, time: new Date() };
+    state.segments.push(seg);
+    state.interimSrc = "";
+    state.interimTgt = "";
+    render();
+    if (state.translator) {
+      translate(src)
+        .then((out) => { seg.tgt = out ?? src; seg.words = null; })
+        .catch(() => { seg.tgt = "⚠ " + src; })
+        .finally(render);
+    }
+  }
+
+  // ---------- reconocimiento de voz ----------
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+  // Captura el audio de la pestaña (donde suena la transmisión) en vez del micrófono.
+  // Así no se reconoce la voz del intérprete y el audio llega limpio.
+  async function captureTabAudio() {
+    const stream = await navigator.mediaDevices.getDisplayMedia({
+      video: true,                 // Chrome exige vídeo; se descarta enseguida
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+      preferCurrentTab: true,
+      selfBrowserSurface: "include",
+      systemAudio: "include",
+      surfaceSwitching: "include"
+    });
+    stream.getVideoTracks().forEach((t) => t.stop());
+    const track = stream.getAudioTracks()[0];
+    if (!track) {
+      stream.getTracks().forEach((t) => t.stop());
+      throw new Error("No se compartió el audio. Al elegir la pestaña, activa la casilla «Compartir también el audio de la pestaña».");
+    }
+    track.addEventListener("ended", () => {
+      if (state.running) { showBanner("Se dejó de compartir el audio de la pestaña."); stop(); }
+    });
+    state.audioStream = stream;
+    state.audioTrack = track;
+  }
+  async function captureMicAudio() {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: true, channelCount: 1 }
+    });
+    state.audioStream = stream;
+    state.audioTrack = stream.getAudioTracks()[0];
+  }
+
+  // Motor Whisper: envía el audio (PCM 16 kHz) al servidor local y recibe texto
+  const WORKLET = `class Pcm16 extends AudioWorkletProcessor {
+    constructor() { super(); this.buf = new Int16Array(1600); this.n = 0; }
+    process(inputs) {
+      const ch = inputs[0] && inputs[0][0];
+      if (ch) for (let i = 0; i < ch.length; i++) {
+        const v = Math.max(-1, Math.min(1, ch[i]));
+        this.buf[this.n++] = v < 0 ? v * 32768 : v * 32767;
+        if (this.n === this.buf.length) {
+          this.port.postMessage(this.buf.buffer, [this.buf.buffer]);
+          this.buf = new Int16Array(1600); this.n = 0;
+        }
+      }
+      return true;
+    }
+  }
+  registerProcessor("pcm16", Pcm16);`;
+
+  async function startWhisper() {
+    const url = el.whisperUrl.value.trim() || DEFAULT_WS;
+    const ws = new WebSocket(url);
+    ws.binaryType = "arraybuffer";
+    await new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error("tiempo de espera agotado")), 4000);
+      ws.onopen = () => { clearTimeout(t); resolve(); };
+      ws.onerror = () => { clearTimeout(t); reject(new Error("no responde")); };
+    }).catch((err) => {
+      throw new Error(`No se puede conectar con el servidor Whisper (${url}): ${err.message}. ¿Está arrancado?`);
+    });
+    state.ws = ws;
+    ws.onmessage = (e) => {
+      let m; try { m = JSON.parse(e.data); } catch { return; }
+      if (m.type === "partial") {
+        state.interimSrc = (m.text || "").trim();
+        if (!state.interimSrc) state.interimTgt = "";
+        render(); scheduleInterim();
+      } else if (m.type === "final") {
+        commitFinal(m.text || "");
+      } else if (m.type === "status") {
+        setStatus(m.level || "live", m.text);
+      }
+    };
+    ws.onclose = () => {
+      if (state.running && state.ws === ws) { showBanner("Se perdió la conexión con el servidor Whisper."); stop(); }
+    };
+
+    const ctx = new AudioContext({ sampleRate: 16000 });
+    await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], { type: "application/javascript" })));
+    const src = ctx.createMediaStreamSource(new MediaStream([state.audioTrack]));
+    const node = new AudioWorkletNode(ctx, "pcm16");
+    node.port.onmessage = (e) => { if (ws.readyState === WebSocket.OPEN) ws.send(e.data); };
+    const mute = ctx.createGain();
+    mute.gain.value = 0;               // no se reproduce nada por los altavoces
+    src.connect(node); node.connect(mute); mute.connect(ctx.destination);
+    state.audioCtx = ctx;
+    setStatus("live", "Escuchando (Whisper local)");
+  }
+  function stopWhisper() {
+    const ws = state.ws; state.ws = null;
+    if (ws) { try { ws.close(); } catch { /* ignorar */ } }
+    if (state.audioCtx) { state.audioCtx.close().catch(() => {}); state.audioCtx = null; }
+  }
+
+  function releaseTabAudio() {
+    if (state.audioStream) state.audioStream.getTracks().forEach((t) => t.stop());
+    state.audioStream = null;
+    state.audioTrack = null;
+  }
+
+  function startRecognition() {
+    const r = new SR();
+    r.lang = speechCode(el.src.value);
+    r.continuous = true;
+    r.interimResults = true;
+    r.maxAlternatives = 1;
+
+    r.onstart = () => setStatus("live", "Escuchando");
+    r.onresult = (event) => {
+      let interim = "";
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const res = event.results[i];
+        if (res.isFinal) commitFinal(res[0].transcript);
+        else interim += res[0].transcript;
+      }
+      state.interimSrc = interim.trim();
+      if (!state.interimSrc) state.interimTgt = "";
+      render();
+      scheduleInterim();
+    };
+    r.onerror = (e) => {
+      if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+        showBanner("No hay permiso para usar el micrófono. Pulsa el icono del candado en la barra de direcciones y permite el micrófono.");
+        stop();
+      } else if (e.error === "network") {
+        state.lastNetworkError = Date.now();
+        setStatus("err", "Sin internet: reintentando…");
+      } else if (e.error === "audio-capture") {
+        showBanner("No se encuentra ningún micrófono. Conecta uno o revisa la configuración de sonido.");
+        stop();
+      } else if (e.error !== "no-speech" && e.error !== "aborted") {
+        setStatus("warn", "Aviso: " + e.error);
+      }
+    };
+    // Chrome corta el reconocimiento cada cierto tiempo: se vuelve a arrancar solo
+    // (con una instancia nueva, necesario cuando se usa una pista de audio)
+    r.onend = () => {
+      if (!state.running || state.recog !== r) return;
+      if (state.interimSrc) commitFinal(state.interimSrc);
+      const delay = Date.now() - state.lastNetworkError < 3000 ? 2000 : 150;
+      setTimeout(() => {
+        if (!state.running || state.recog !== r) return;
+        try { startRecognition(); } catch (err) { setStatus("err", "No se pudo reanudar: " + (err.message || err)); }
+      }, delay);
+    };
+
+    state.recog = r;
+    if (state.audioTrack && state.audioTrack.readyState === "live") r.start(state.audioTrack);
+    else r.start();
+  }
+
+  async function requestWakeLock() {
+    try { if ("wakeLock" in navigator) state.wakeLock = await navigator.wakeLock.request("screen"); } catch { /* opcional */ }
+  }
+  document.addEventListener("visibilitychange", () => {
+    if (state.running && document.visibilityState === "visible") requestWakeLock();
+  });
+
+  async function start() {
+    if (!SR) {
+      showBanner("Este navegador no tiene reconocimiento de voz. Abre esta página en Google Chrome (o Microsoft Edge) en un ordenador.");
+      return;
+    }
+    showBanner("");
+    parseGlossary();
+    el.toggle.disabled = true;
+
+    // Ambas peticiones se lanzan enseguida, dentro del clic del usuario,
+    // porque el navegador solo las permite justo después de una interacción.
+    const useWhisper = el.engine.value === "whisper";
+    const needTab = el.audioSource.value === "tab" && !state.audioTrack;
+    const needMic = useWhisper && el.audioSource.value === "mic" && !state.audioTrack;
+    const translatorReady = ensureTranslator();
+    if (needTab) setStatus("warn", "Elige la pestaña y activa «Compartir audio»…");
+    const audioReady = needTab ? captureTabAudio() : needMic ? captureMicAudio() : Promise.resolve();
+    const [tr, au] = await Promise.allSettled([translatorReady, audioReady]);
+
+    if (au.status === "rejected") {
+      const err = au.reason;
+      el.toggle.disabled = false;
+      setStatus("err", "Sin audio");
+      showBanner((err && err.name === "NotAllowedError")
+        ? (needTab
+          ? "Se canceló la selección de pestaña. Pulsa «Empezar» otra vez, elige esta pestaña (o la de la transmisión) y activa «Compartir audio». También puedes cambiar a «Micrófono»."
+          : "No hay permiso para usar el micrófono. Pulsa el icono del candado en la barra de direcciones y permítelo.")
+        : "No se pudo capturar el audio: " + (err && err.message ? err.message : err));
+      return;
+    }
+    if (tr.status === "rejected") {
+      state.translator = null;
+      const err = tr.reason;
+      showBanner("El traductor no está listo (" + (err && err.message ? err.message : err) + "). Se muestra solo la transcripción; pulsa «Parar» y «Empezar» de nuevo para reintentar.");
+    }
+
+    state.running = true;
+    el.toggle.disabled = false;
+    el.toggle.textContent = "■ Parar";
+    el.toggle.classList.add("running");
+    if (el.target.querySelector(".empty")) el.target.innerHTML = "";
+    requestWakeLock();
+    if (useWhisper) {
+      try {
+        await startWhisper();
+      } catch (err) {
+        showBanner(err && err.message ? err.message : String(err));
+        stop();
+      }
+      return;
+    }
+    try {
+      startRecognition();
+    } catch (err) {
+      showBanner("No se pudo iniciar el reconocimiento de voz: " + (err && err.message ? err.message : err) +
+        (state.audioTrack ? " — Tu versión de Chrome quizá no permite usar el audio de la pestaña: actualiza Chrome o cambia a «Micrófono»." : ""));
+      stop();
+    }
+  }
+
+  function stop({ keepAudio = false } = {}) {
+    state.running = false;
+    const r = state.recog;
+    state.recog = null;
+    if (r) { try { r.stop(); } catch { /* ignorar */ } }
+    stopWhisper();
+    if (!keepAudio) releaseTabAudio();
+    if (state.interimSrc) commitFinal(state.interimSrc);
+    if (state.wakeLock) { state.wakeLock.release().catch(() => {}); state.wakeLock = null; }
+    el.toggle.disabled = false;
+    el.toggle.textContent = "▶ Empezar";
+    el.toggle.classList.remove("running");
+    setStatus("", "Detenido");
+  }
+
+  async function restartIfRunning() {
+    store.set("srcLang", el.src.value);
+    store.set("tgtLang", el.tgt.value);
+    if (state.running) { stop({ keepAudio: true }); await start(); }
+  }
+
+  // ---------- controles ----------
+  el.toggle.addEventListener("click", () => (state.running ? stop() : start()));
+  el.src.addEventListener("change", () => {
+    if (el.engine.value === "whisper" && !el.src.value.startsWith("de")) {
+      el.engine.value = "chrome"; store.set("engine", "chrome");
+      showBanner("Cambiado al motor Chrome: el motor Whisper suizo es solo para alemán.");
+    }
+    restartIfRunning();
+  });
+  el.tgt.addEventListener("change", restartIfRunning);
+  el.swap.addEventListener("click", () => {
+    [el.src.value, el.tgt.value] = [el.tgt.value, el.src.value];
+    restartIfRunning();
+  });
+  el.clear.addEventListener("click", () => {
+    state.segments = []; state.interimSrc = ""; state.interimTgt = "";
+    state.readSeg = 0; state.readWord = 0; state.readBudget = 0;
+    el.target.innerHTML = ""; el.source.innerHTML = "";
+  });
+  function setFont(px) {
+    fontSize = Math.min(120, Math.max(18, px));
+    document.documentElement.style.setProperty("--fs", fontSize + "px");
+    store.set("fontSize", String(fontSize));
+    if (typeof padToGuide === "function") padToGuide();
+  }
+  el.smaller.addEventListener("click", () => setFont(fontSize - 4));
+  el.bigger.addEventListener("click", () => setFont(fontSize + 4));
+  el.fullscreen.addEventListener("click", () => {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else document.documentElement.requestFullscreen().catch(() => {});
+  });
+  el.openSettings.addEventListener("click", () => el.settings.classList.toggle("open"));
+  el.glossary.addEventListener("input", () => { store.set("glossary", el.glossary.value); parseGlossary(); });
+  el.liveInterim.addEventListener("change", () => store.set("liveInterim", el.liveInterim.checked ? "1" : "0"));
+  el.interimMs.addEventListener("change", () => store.set("interimMs", el.interimMs.value));
+  el.exportBtn.addEventListener("click", () => {
+    const pad = (n) => String(n).padStart(2, "0");
+    const lines = state.segments.map((s) => {
+      const t = `${pad(s.time.getHours())}:${pad(s.time.getMinutes())}:${pad(s.time.getSeconds())}`;
+      return `[${t}] ${s.src}\n         ${s.tgt ?? ""}`;
+    });
+    const blob = new Blob([lines.join("\n\n")], { type: "text/plain;charset=utf-8" });
+    const a = document.createElement("a");
+    const d = new Date();
+    a.href = URL.createObjectURL(blob);
+    a.download = `predica-${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}.txt`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  });
+
+  // ---------- transmisión en vivo al lado ----------
+  function toEmbedUrl(raw) {
+    let url;
+    try { url = new URL(raw.trim()); } catch { return null; }
+    const host = url.hostname.replace(/^www\.|^m\./, "");
+    let id = null;
+    if (host === "youtu.be") id = url.pathname.slice(1).split("/")[0];
+    else if (host.endsWith("youtube.com")) {
+      if (url.searchParams.get("v")) id = url.searchParams.get("v");
+      else {
+        const m = url.pathname.match(/^\/(?:live|embed|shorts)\/([\w-]{6,})/);
+        if (m) id = m[1];
+        else if (/^\/(@[^/]+|channel\/[^/]+)\/live\/?$/.test(url.pathname)) {
+          showBanner("Para canales, abre el directo y copia el enlace del video (el que tiene «watch?v=…» o «/live/…»).");
+          return null;
+        }
+      }
+    }
+    if (id) return `https://www.youtube.com/embed/${encodeURIComponent(id)}?autoplay=1&playsinline=1`;
+    if (host === "vimeo.com") {
+      const m = url.pathname.match(/^\/(?:event\/)?(\d+)/);
+      if (m) return url.pathname.startsWith("/event/")
+        ? `https://vimeo.com/event/${m[1]}/embed`
+        : `https://player.vimeo.com/video/${m[1]}?autoplay=1`;
+    }
+    if (host === "facebook.com" || host === "fb.watch") {
+      return `https://www.facebook.com/plugins/video.php?href=${encodeURIComponent(url.href)}&show_text=false`;
+    }
+    return url.protocol === "https:" ? url.href : null;
+  }
+  function openStream() {
+    const embed = toEmbedUrl(el.streamUrl.value);
+    if (!embed) { if (el.streamUrl.value.trim()) showBanner("Ese enlace no es válido (debe empezar por https://)."); return; }
+    store.set("streamUrl", el.streamUrl.value.trim());
+    el.videoFrame.src = embed;
+    el.layout.classList.add("with-video");
+  }
+  el.openStream.addEventListener("click", openStream);
+  el.streamUrl.addEventListener("keydown", (e) => { if (e.key === "Enter") openStream(); });
+  el.closeStream.addEventListener("click", () => {
+    el.videoFrame.src = "about:blank";
+    el.layout.classList.remove("with-video");
+  });
+  function updateReadLabel() {
+    const v = Number(el.readWpm.value);
+    el.readWpmLabel.textContent = v >= UNLIMITED ? "sin límite" : `${v} pal/min`;
+  }
+  updateReadLabel();
+  el.readWpm.addEventListener("input", () => { updateReadLabel(); store.set("readWpm", el.readWpm.value); });
+  el.autoCatch.addEventListener("change", () => store.set("autoCatch", el.autoCatch.checked ? "1" : "0"));
+  el.catchup.addEventListener("click", () => {
+    const now = performance.now();
+    while (revealNextWord(now)) { /* mostrar todo */ }
+    state.readPauseUntil = 0; state.userScrollUntil = 0;
+    render();
+  });
+  // Espacio arriba para que incluso la primera línea se lea sobre la línea guía
+  function padToGuide() {
+    const lineH = parseFloat(getComputedStyle(el.target).fontSize) * 1.35;
+    const h = el.target.parentElement.clientHeight;
+    const guideY = h * (Number(el.guidePos.value) / 100);
+    const root = document.documentElement.style;
+    root.setProperty("--pad-top", (el.guideOn.checked ? Math.max(16, guideY - lineH * 1.15) : 16) + "px");
+    root.setProperty("--pad-bottom", Math.max(lineH, h - guideY + lineH) + "px");
+  }
+  window.addEventListener("resize", padToGuide);
+  function applyGuide() {
+    padToGuide();
+    document.documentElement.style.setProperty("--guide", el.guidePos.value + "%");
+    el.guide.classList.toggle("hidden", !el.guideOn.checked);
+    store.set("guidePos", el.guidePos.value);
+    store.set("guideOn", el.guideOn.checked ? "1" : "0");
+  }
+  applyGuide();
+  el.guidePos.addEventListener("input", applyGuide);
+  el.guideOn.addEventListener("change", applyGuide);
+  // Arrastrar la línea guía directamente
+  el.guideHandle.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    el.guideHandle.setPointerCapture(e.pointerId);
+    const box = el.target.getBoundingClientRect();
+    const move = (ev) => {
+      el.guidePos.value = String(Math.round(Math.min(85, Math.max(15, ((ev.clientY - box.top) / box.height) * 100))));
+      applyGuide();
+    };
+    el.guideHandle.addEventListener("pointermove", move);
+    el.guideHandle.addEventListener("pointerup", () => el.guideHandle.removeEventListener("pointermove", move), { once: true });
+  });
+  // Atajos de teclado (fuera de campos de texto): flechas = velocidad, Fin = al día
+  document.addEventListener("keydown", (e) => {
+    if (/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) return;
+    if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+      el.readWpm.value = String(Number(el.readWpm.value) + (e.key === "ArrowUp" ? 10 : -10));
+      updateReadLabel(); store.set("readWpm", el.readWpm.value); e.preventDefault();
+    } else if (e.key === "End") { el.catchup.click(); e.preventDefault(); }
+  });
+
+  el.engine.addEventListener("change", () => {
+    store.set("engine", el.engine.value);
+    if (el.engine.value === "whisper" && !el.src.value.startsWith("de")) {
+      el.src.value = "de-CH";
+      showBanner("El motor Whisper es solo para alemán y suizo alemán. Para francés o inglés usa el motor Chrome.");
+    }
+    if (state.running) { stop(); start(); }
+  });
+  el.whisperUrl.addEventListener("change", () => store.set("whisperUrl", el.whisperUrl.value.trim()));
+  el.audioSource.addEventListener("change", () => {
+    store.set("audioSource", el.audioSource.value);
+    if (state.running) { stop(); start(); }
+  });
+
+  // Separador arrastrable entre vídeo y traducción
+  el.splitter.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    el.splitter.setPointerCapture(e.pointerId);
+    el.videoFrame.style.pointerEvents = "none";
+    const move = (ev) => {
+      const pct = Math.min(80, Math.max(15, (ev.clientX / window.innerWidth) * 100));
+      document.documentElement.style.setProperty("--video-w", pct + "%");
+    };
+    const up = () => {
+      el.splitter.removeEventListener("pointermove", move);
+      el.videoFrame.style.pointerEvents = "";
+      store.set("videoW", getComputedStyle(document.documentElement).getPropertyValue("--video-w").trim());
+    };
+    el.splitter.addEventListener("pointermove", move);
+    el.splitter.addEventListener("pointerup", up, { once: true });
+  });
+  const savedW = store.get("videoW", "");
+  if (savedW) document.documentElement.style.setProperty("--video-w", savedW);
+
+  parseGlossary();
+  if ("Translator" in self && trCode(el.src.value) !== trCode(el.tgt.value)) {
+    Translator.availability({ sourceLanguage: trCode(el.src.value), targetLanguage: trCode(el.tgt.value) })
+      .then((a) => (a === "available" ? ensureTranslator() : null))
+      .then(() => { if (!state.running) setStatus("", "Listo"); })
+      .catch(() => {});
+  }
+  if (!SR) showBanner("Este navegador no tiene reconocimiento de voz. Abre esta página en Google Chrome (o Microsoft Edge) en un ordenador.");
+  else if (!("Translator" in self)) showBanner("Este navegador no tiene el traductor integrado (necesita Chrome 138+ en ordenador). La transcripción funcionará, pero sin traducción.");
+})();
+</script>
+</body>
+</html>
