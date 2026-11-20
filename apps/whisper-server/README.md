@@ -38,6 +38,18 @@ En la barra elige **Voz: Whisper suizo-alemán** y pulsa **Empezar**.
 | `--silence 0.4` | 0.5 | Pausa más corta para cerrar frase |
 | `--model …` | `Flurin17/whisper-large-v3-turbo-swiss-german` | Probar otro modelo, p. ej. `nizarmichaud/whisper-large-v3-turbo-swissgerman` |
 | `--verbose` | — | Muestra cuánto tarda cada paso |
+| `--allow-origin URL` | — | Permitir que otra web (p. ej. la página publicada en GitHub Pages) use el servidor |
 
 Si aparece «Whisper va lento», el Mac no da abasto: sube `--partial-every`
 o prueba un Mac más potente.
+
+## Seguridad
+Solo acepta conexiones de páginas abiertas en este ordenador (`localhost`). Otra web abierta
+en el navegador no puede usar el servidor a escondidas.
+
+## Pruebas
+```bash
+python3 test_server.py
+```
+Comprueban los cortes de frase, el descarte de ruidos cortos, la voz con volumen bajo
+y el filtro de seguridad, sin cargar el modelo.

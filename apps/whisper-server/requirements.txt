@@ -1,4 +1,5 @@
-torch
-transformers>=4.45
-aiohttp>=3.9
-numpy
+# Versiones probadas (Mac M3, Python 3.14). Actualizar a propósito, no por accidente.
+torch==2.15.0
+transformers==5.23.0
+aiohttp==3.14.5
+numpy==2.5.5

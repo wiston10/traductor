@@ -145,7 +145,8 @@ class Segmenter:
             return None, None
         # Ruido de fondo adaptativo: percentil bajo de la energía reciente
         self.noise = 0.95 * self.noise + 0.05 * float(np.percentile(rms[-100:], 10))
-        threshold = max(0.008, self.noise * 3.0)
+        # Suelo bajo: el audio de una pestaña con el volumen del vídeo bajado llega flojo
+        threshold = max(0.003, self.noise * 3.0)
         speech = rms > threshold
 
         if not speech.any():
@@ -163,7 +164,11 @@ class Segmenter:
         trailing_s = trailing * FRAME / SAMPLE_RATE
 
         if trailing_s >= self.silence:
-            return "final", self._cut(len(self.buf))
+            audio = self._cut(len(self.buf))
+            # Menos de 0,25 s de voz (tos, golpe, ruido): Whisper solo "inventaría" texto
+            if speech.sum() * FRAME / SAMPLE_RATE < 0.25:
+                return None, None
+            return "final", audio
 
         if self.seconds >= self.max_seg:
             # Cortar en el marco más silencioso de los últimos 2 s
@@ -183,6 +188,13 @@ class Segmenter:
 
         return None, None
 
+    def flush(self) -> np.ndarray | None:
+        """Entrega todo lo pendiente (si tiene algo de voz) y vacía el búfer."""
+        rms = self._frame_rms()
+        has_speech = len(rms) and (rms > max(0.003, self.noise * 3.0)).sum() * FRAME / SAMPLE_RATE >= 0.25
+        audio = self._cut(len(self.buf))
+        return audio if has_speech else None
+
     def _cut(self, n: int) -> np.ndarray:
         audio, self.buf = self.buf[:n], self.buf[n:]
         self.last_partial = 0.0
@@ -194,8 +206,23 @@ class Segmenter:
 # ---------------------------------------------------------------------------
 # Servidor web + WebSocket
 # ---------------------------------------------------------------------------
+def origin_allowed(origin: str | None, extra: list[str]) -> bool:
+    if not origin or origin == "null":          # archivo abierto con doble clic
+        return True
+    if origin in extra:
+        return True
+    try:
+        from urllib.parse import urlparse
+        return urlparse(origin).hostname in {"localhost", "127.0.0.1", "::1"}
+    except ValueError:
+        return False
+
+
 async def ws_handler(request: web.Request) -> web.WebSocketResponse:
     app = request.app
+    if not origin_allowed(request.headers.get("Origin"), app["args"].allow_origin):
+        log.warning("Conexión rechazada desde %s", request.headers.get("Origin"))
+        raise web.HTTPForbidden(text="Origen no permitido")
     transcriber: Transcriber = app["transcriber"]
     args = app["args"]
     ws = web.WebSocketResponse(max_msg_size=4 * 1024 * 1024)
@@ -247,23 +274,34 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
             elif kind == "final":
                 await send("status", f"Escuchando · {seg.step_cost:.1f}s por paso", "live")
 
+    async def flush() -> None:
+        audio = seg.flush()
+        if audio is not None:
+            try:
+                text = await transcriber.transcribe(audio)
+                if not is_hallucination(text):
+                    await send("final", text)
+            except Exception:  # noqa: BLE001
+                log.exception("Error al transcribir lo pendiente")
+        await send("flushed", "")
+
     task = asyncio.create_task(worker())
     try:
         async for msg in ws:
             if msg.type == WSMsgType.BINARY:
                 seg.add(msg.data)
+            elif msg.type == WSMsgType.TEXT:
+                try:
+                    data = json.loads(msg.data)
+                except ValueError:
+                    continue
+                if data.get("type") == "flush":
+                    closed.set()          # el trabajador deja de cortar mientras vaciamos
+                    await flush()
             elif msg.type == WSMsgType.ERROR:
                 break
     finally:
         closed.set()
-        # Lo que quedaba pendiente se transcribe como frase final
-        if seg.seconds > 0.5 and not ws.closed:
-            try:
-                text = await transcriber.transcribe(seg.buf)
-                if not is_hallucination(text):
-                    await send("final", text)
-            except Exception:  # noqa: BLE001
-                pass
         task.cancel()
         log.info("Cliente desconectado")
     return ws
@@ -290,6 +328,8 @@ def main() -> None:
                         help="Pausa (s) que cierra una frase")
     parser.add_argument("--max-seg", type=float, default=6.0,
                         help="Duración máxima (s) de un segmento si el predicador no hace pausas")
+    parser.add_argument("--allow-origin", action="append", default=[],
+                        help="Permitir otra web (p. ej. https://usuario.github.io). Repetible.")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 

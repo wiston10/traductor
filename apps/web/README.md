@@ -14,7 +14,8 @@ y una traducción automática. Gratis, sin claves de API ni servidor.
    - o publícala gratis en GitHub Pages / Netlify (debe ser https).
 2. Elige idiomas (por defecto Alemán → Español) y pulsa **Empezar**.
 3. Permite el micrófono.
-4. En **Ajustes** edita el glosario de términos de la iglesia.
+4. En **Ajustes** edita el glosario de términos de la iglesia. Va por secciones según el
+   par de idiomas (`[de>es]`, `[fr>es]`, `[en>es]`…); solo se aplica la del par activo.
 
 ## Con la transmisión en vivo al lado
 1. Pega el enlace del directo (YouTube, Vimeo, Facebook…) y pulsa **Mostrar al lado**.

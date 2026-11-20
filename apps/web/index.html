@@ -106,7 +106,7 @@
 </header>
 <div id="banner"></div>
 <section id="settings">
-  <div class="hint"><b>Glosario</b>: una línea por término, con el formato <code>original = traducción</code>.
+  <div class="hint"><b>Glosario</b>: una sección por par de idiomas (<code>[de>es]</code>, <code>[fr>es]</code>…) y una línea por término, con el formato <code>original = traducción</code>.
     Se aplica antes de traducir para que los términos clave siempre salgan igual. Las líneas que empiezan por # se ignoran.</div>
   <textarea id="glossary" spellcheck="false"></textarea>
   <p>
@@ -175,7 +175,9 @@
   const trCode = (code) => code.split("-")[0];
 
   const DEFAULT_GLOSSARY = [
-    "# alemán = español (añade aquí los términos de tu iglesia)",
+    "# Una sección por par de idiomas: [origen>destino]. Formato: original = traducción",
+    "# Las líneas antes de la primera sección se aplican a alemán → español.",
+    "[de>es]",
     "Heiliger Geist = Espíritu Santo",
     "Heiligen Geist = Espíritu Santo",
     "Heiligen Geistes = Espíritu Santo",
@@ -187,7 +189,15 @@
     "Sünde = pecado",
     "Sünden = pecados",
     "Erlösung = redención",
-    "Evangelium = evangelio"
+    "Evangelium = evangelio",
+    "",
+    "[fr>es]",
+    "Saint-Esprit = Espíritu Santo",
+    "Sainte Cène = Santa Cena",
+    "",
+    "[en>es]",
+    "Holy Spirit = Espíritu Santo",
+    "Lord's Supper = Santa Cena"
   ].join("\n");
 
   // ---------- almacenamiento local (puede fallar en algunos contextos) ----------
@@ -303,6 +313,10 @@
   }
 
   let lastTick = performance.now();
+  let lineHeightPx = 0;                 // se recalcula solo al cambiar la letra o el tamaño
+  const lineH = () => lineHeightPx || (lineHeightPx = parseFloat(getComputedStyle(el.target).fontSize) * 1.35);
+  let lastBacklog = -1;
+  let scrollSettled = false;            // el texto ya está en su sitio: no tocar el DOM
   function readingTick(now) {
     const dt = Math.min(250, now - lastTick);
     lastTick = now;
@@ -322,10 +336,13 @@
       }
     }
     const backlog = backlogWords();
-    el.catchup.textContent = backlog > 0 ? `Al día (${backlog})` : "Al día";
-    el.catchup.classList.toggle("behind", backlog > 40);
-    if (changed) render();
-    smoothScroll();
+    if (backlog !== lastBacklog) {
+      lastBacklog = backlog;
+      el.catchup.textContent = backlog > 0 ? `Al día (${backlog})` : "Al día";
+      el.catchup.classList.toggle("behind", backlog > 40);
+    }
+    if (changed) { render(); scrollSettled = false; }
+    if (!scrollSettled) smoothScroll();
     requestAnimationFrame(readingTick);
   }
   requestAnimationFrame(readingTick);
@@ -362,6 +379,7 @@
       const interimText = sameLang ? state.interimSrc : state.interimTgt;
       if (interimText && caughtUp()) html.push(`<p class="seg interim">${escapeHtml(interimText)}</p>`);
       if (html.length || state.segments.length) el.target.innerHTML = html.join("");
+      scrollSettled = false;
     });
   }
 
@@ -374,35 +392,50 @@
       el.target.lastElementChild;
     if (!cur) return;
     const guideY = el.target.clientHeight * (Number(el.guidePos.value) / 100);
-    const lineH = parseFloat(getComputedStyle(el.target).fontSize) * 1.35;
     if (!el.guideOn.checked) {      // sin línea guía: seguir el final del texto
-      const want = el.target.scrollHeight - el.target.clientHeight - (h0(el) || 0);
-      el.target.scrollTop += (Math.max(0, want) - el.target.scrollTop) * 0.12;
+      const want = Math.max(0, el.target.scrollHeight - el.target.clientHeight - (h0(el) || 0));
+      const d = want - el.target.scrollTop;
+      if (Math.abs(d) < 4) { el.target.scrollTop = want; scrollSettled = true; return; }
+      el.target.scrollTop += d * 0.12;
       return;
     }
     const curTop = cur.getBoundingClientRect().top - el.target.getBoundingClientRect().top + el.target.scrollTop;
     const curBottom = cur.classList.contains("w-cur")
-      ? curTop + lineH
+      ? curTop + lineH()
       : curTop + cur.getBoundingClientRect().height;
     const want = Math.max(0, curBottom - guideY);
     const diff = want - el.target.scrollTop;
-    if (Math.abs(diff) < 1) return;
+    // Si ya está en su sitio (o no se puede bajar más), dejar de recalcular hasta el próximo cambio
+    const maxScroll = el.target.scrollHeight - el.target.clientHeight;
+    if (diff > 0 && el.target.scrollTop >= maxScroll - 1) { scrollSettled = true; return; }
+    // Los píxeles se redondean: el último tramo se ajusta de golpe para que no se quede "temblando"
+    if (Math.abs(diff) < 4) { el.target.scrollTop = want; scrollSettled = true; return; }
     el.target.scrollTop += diff * 0.12;    // se acerca poco a poco: sin saltos bruscos
   }
   for (const ev of ["wheel", "touchmove"]) {
-    el.target.addEventListener(ev, () => { state.userScrollUntil = performance.now() + 6000; }, { passive: true });
+    el.target.addEventListener(ev, () => {
+      state.userScrollUntil = performance.now() + 6000;
+      setTimeout(() => { scrollSettled = false; }, 6050);   // volver a la línea guía después
+    }, { passive: true });
   }
 
   // ---------- glosario ----------
   let glossaryRules = [];
+  // Solo se aplican las reglas del par de idiomas actual (p. ej. [de>es]); así un
+  // término en español nunca se cuela en una traducción al inglés o al francés.
   function parseGlossary() {
-    glossaryRules = el.glossary.value.split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line && !line.startsWith("#") && line.includes("="))
-      .map((line) => {
-        const idx = line.indexOf("=");
-        return [line.slice(0, idx).trim(), line.slice(idx + 1).trim()];
-      })
+    const pair = trCode(el.src.value) + ">" + trCode(el.tgt.value);
+    let section = "de>es";
+    const pairs = [];
+    for (const raw of el.glossary.value.split("\n")) {
+      const line = raw.trim();
+      const head = line.match(/^\[\s*([a-z]{2})\s*>\s*([a-z]{2})\s*\]$/i);
+      if (head) { section = (head[1] + ">" + head[2]).toLowerCase(); continue; }
+      if (!line || line.startsWith("#") || !line.includes("=") || section !== pair) continue;
+      const idx = line.indexOf("=");
+      pairs.push([line.slice(0, idx).trim(), line.slice(idx + 1).trim()]);
+    }
+    glossaryRules = pairs
       .filter(([a, b]) => a && b)
       .sort((x, y) => y[0].length - x[0].length)
       .map(([a, b]) => {
@@ -563,19 +596,56 @@
     };
 
     const ctx = new AudioContext({ sampleRate: 16000 });
-    await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], { type: "application/javascript" })));
     const src = ctx.createMediaStreamSource(new MediaStream([state.audioTrack]));
-    const node = new AudioWorkletNode(ctx, "pcm16");
-    node.port.onmessage = (e) => { if (ws.readyState === WebSocket.OPEN) ws.send(e.data); };
     const mute = ctx.createGain();
     mute.gain.value = 0;               // no se reproduce nada por los altavoces
+    const sendPcm = (buf) => { if (ws.readyState === WebSocket.OPEN) ws.send(buf); };
+    let node;
+    try {
+      await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], { type: "application/javascript" })));
+      node = new AudioWorkletNode(ctx, "pcm16");
+      node.port.onmessage = (e) => sendPcm(e.data);
+    } catch {
+      // Página abierta con doble clic (file://): Chrome no carga el módulo de audio.
+      // Alternativa más antigua pero compatible.
+      node = ctx.createScriptProcessor(4096, 1, 1);
+      node.onaudioprocess = (e) => {
+        const ch = e.inputBuffer.getChannelData(0);
+        const out = new Int16Array(ch.length);
+        for (let i = 0; i < ch.length; i++) {
+          const v = Math.max(-1, Math.min(1, ch[i]));
+          out[i] = v < 0 ? v * 32768 : v * 32767;
+        }
+        sendPcm(out.buffer);
+      };
+    }
     src.connect(node); node.connect(mute); mute.connect(ctx.destination);
     state.audioCtx = ctx;
     setStatus("live", "Escuchando (Whisper local)");
   }
   function stopWhisper() {
     const ws = state.ws; state.ws = null;
-    if (ws) { try { ws.close(); } catch { /* ignorar */ } }
+    if (ws) {
+      // La última frase la entrega el servidor (mejor calidad); si no responde en 4 s,
+      // se usa el texto provisional que ya tenía la página. Así no sale repetida.
+      let pending = state.interimSrc;
+      state.interimSrc = ""; state.interimTgt = "";
+      const finish = () => {
+        if (pending) { commitFinal(pending); pending = ""; }
+        try { ws.close(); } catch { /* ignorar */ }
+      };
+      ws.onclose = null;
+      ws.onmessage = (e) => {
+        let m; try { m = JSON.parse(e.data); } catch { return; }
+        if (m.type === "final") { pending = ""; commitFinal(m.text || ""); }
+        if (m.type === "flushed") finish();
+      };
+      try {
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "flush" }));
+        else finish();
+      } catch { finish(); }
+      setTimeout(finish, 4000);
+    }
     if (state.audioCtx) { state.audioCtx.close().catch(() => {}); state.audioCtx = null; }
   }
 
@@ -644,7 +714,7 @@
   });
 
   async function start() {
-    if (!SR) {
+    if (!SR && el.engine.value !== "whisper") {
       showBanner("Este navegador no tiene reconocimiento de voz. Abre esta página en Google Chrome (o Microsoft Edge) en un ordenador.");
       return;
     }
@@ -721,6 +791,7 @@
   async function restartIfRunning() {
     store.set("srcLang", el.src.value);
     store.set("tgtLang", el.tgt.value);
+    parseGlossary();
     if (state.running) { stop({ keepAudio: true }); await start(); }
   }
 
@@ -827,17 +898,18 @@
   el.catchup.addEventListener("click", () => {
     const now = performance.now();
     while (revealNextWord(now)) { /* mostrar todo */ }
-    state.readPauseUntil = 0; state.userScrollUntil = 0;
+    state.readPauseUntil = 0; state.userScrollUntil = 0; scrollSettled = false;
     render();
   });
   // Espacio arriba para que incluso la primera línea se lea sobre la línea guía
   function padToGuide() {
-    const lineH = parseFloat(getComputedStyle(el.target).fontSize) * 1.35;
+    lineHeightPx = 0; scrollSettled = false;
+    const lh = lineH();
     const h = el.target.parentElement.clientHeight;
     const guideY = h * (Number(el.guidePos.value) / 100);
     const root = document.documentElement.style;
-    root.setProperty("--pad-top", (el.guideOn.checked ? Math.max(16, guideY - lineH * 1.15) : 16) + "px");
-    root.setProperty("--pad-bottom", Math.max(lineH, h - guideY + lineH) + "px");
+    root.setProperty("--pad-top", (el.guideOn.checked ? Math.max(16, guideY - lh * 1.15) : 16) + "px");
+    root.setProperty("--pad-bottom", Math.max(lh, h - guideY + lh) + "px");
   }
   window.addEventListener("resize", padToGuide);
   function applyGuide() {
@@ -877,7 +949,8 @@
       el.src.value = "de-CH";
       showBanner("El motor Whisper es solo para alemán y suizo alemán. Para francés o inglés usa el motor Chrome.");
     }
-    if (state.running) { stop(); start(); }
+    parseGlossary();
+    if (state.running) { stop({ keepAudio: true }); start(); }
   });
   el.whisperUrl.addEventListener("change", () => store.set("whisperUrl", el.whisperUrl.value.trim()));
   el.audioSource.addEventListener("change", () => {
@@ -912,7 +985,7 @@
       .then(() => { if (!state.running) setStatus("", "Listo"); })
       .catch(() => {});
   }
-  if (!SR) showBanner("Este navegador no tiene reconocimiento de voz. Abre esta página en Google Chrome (o Microsoft Edge) en un ordenador.");
+  if (!SR && el.engine.value !== "whisper") showBanner("Este navegador no tiene reconocimiento de voz. Abre esta página en Google Chrome (o Microsoft Edge) en un ordenador, o usa el motor Whisper.");
   else if (!("Translator" in self)) showBanner("Este navegador no tiene el traductor integrado (necesita Chrome 138+ en ordenador). La transcripción funcionará, pero sin traducción.");
 })();
 </script>

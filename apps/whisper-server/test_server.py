@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""Pruebas rápidas del servidor (no cargan el modelo). Uso: python3 test_server.py"""
+import numpy as np
+
+import server as s
+
+SR = 16000
+rng = np.random.default_rng(0)
+
+
+def voice(sec, amp=0.2):
+    t = np.arange(int(sec * SR)) / SR
+    return (amp * np.sin(2 * np.pi * 200 * t) * (0.6 + 0.4 * np.sin(2 * np.pi * 4 * t))).astype(np.float32)
+
+
+def sil(sec):
+    return rng.normal(0, 0.0008, int(sec * SR)).astype(np.float32)
+
+
+def run(audio):
+    seg = s.Segmenter(1.0, 0.5, 6.0)
+    now, finals = 0.0, []
+    for i in range(0, len(audio), 1600):
+        seg.add((audio[i:i + 1600] * 32767).astype(np.int16).tobytes())
+        now += 0.1
+        kind, a = seg.decide(now)
+        if kind == "final":
+            finals.append(len(a) / SR)
+    return finals, seg
+
+
+def test_frases_con_pausa():
+    finals, _ = run(np.concatenate([sil(1), voice(2), sil(1), voice(3), sil(1)]))
+    assert len(finals) == 2, finals
+
+
+def test_tos_se_descarta():
+    finals, _ = run(np.concatenate([sil(1), voice(0.12), sil(1), voice(2), sil(1)]))
+    assert len(finals) == 1, finals
+
+
+def test_voz_floja_se_detecta():
+    finals, _ = run(np.concatenate([sil(1), voice(2, amp=0.012), sil(1)]))
+    assert len(finals) == 1, finals
+
+
+def test_sin_pausas_corta_a_tiempo():
+    finals, _ = run(np.concatenate([sil(1), voice(20)]))
+    assert len(finals) >= 2 and all(f <= 6.01 for f in finals), finals
+
+
+def test_flush():
+    _, seg = run(np.concatenate([sil(0.5), voice(2.0)]))
+    assert seg.flush() is not None and seg.seconds == 0
+    _, seg = run(sil(1.0))
+    assert seg.flush() is None
+
+
+def test_origenes():
+    assert s.origin_allowed(None, []) and s.origin_allowed("null", [])
+    assert s.origin_allowed("http://localhost:8765", [])
+    assert not s.origin_allowed("https://evil.example", [])
+    assert not s.origin_allowed("http://localhost.evil.example", [])
+    assert s.origin_allowed("https://x.github.io", ["https://x.github.io"])
+
+
+if __name__ == "__main__":
+    tests = [v for k, v in dict(globals()).items() if k.startswith("test_")]
+    for t in tests:
+        t()
+        print("OK ", t.__name__)
+    print(f"{len(tests)} pruebas correctas")
