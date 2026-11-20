@@ -10,7 +10,6 @@ node_modules/
 # --- Secretos y configuración local --------------------------
 .env
 .env.*
-!.env.example
 *.pem
 *.key
 *.p8
@@ -20,7 +19,6 @@ node_modules/
 *.mobileprovision
 
 # --- Salidas de compilación ----------------------------------
-/apps/api/dist/
 /apps/mobile/dist/
 /apps/mobile/web-build/
 /packages/*/dist/

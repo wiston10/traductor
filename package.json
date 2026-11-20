@@ -3,11 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "workspaces": [
-    "apps/*",
+    "apps/mobile",
     "packages/*"
   ],
   "scripts": {
-    "dev:api": "npm run dev -w @traductor/api",
+    "start": "cd apps/whisper-server && .venv/bin/python server.py",
+    "test:server": "cd apps/whisper-server && .venv/bin/python test_server.py",
     "dev:mobile": "npm run start -w @traductor/mobile",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",

@@ -1,180 +1,80 @@
-# Traductor local
+# Traductor — apuntador para intérpretes
 
-Aplicación móvil enfocada en un flujo de traducción local, sin APIs de pago ni servicios externos.
+Herramienta gratuita para una organización sin ánimo de lucro. Ayuda a la persona que
+**interpreta en vivo** una prédica: mientras el predicador habla (alemán, suizo alemán,
+francés o inglés), en la pantalla del intérprete aparece lo que se dice y una traducción
+automática al español, a un ritmo que se puede leer. El intérprete lee, corrige y habla.
 
-## Objetivo
+No usa APIs de pago ni claves: el reconocimiento de voz y la traducción corren en el
+navegador o en el propio Mac.
 
-Convertir la app actual en un traductor de voz Español → Alemán para sesiones largas, con:
+## Cómo funciona
 
-- captura local de audio
-- detección de actividad de voz (VAD)
-- STT local
-- traducción local
-- TTS local
-- pipeline concurrente con control de backpressure
-- transcript persistente local
-- métricas de latencia en milisegundos
+```text
+ Directo (YouTube…) o micrófono
+            │ audio
+            ▼
+ ┌──────────────────────────┐   alemán estándar, francés, inglés
+ │ Motor de voz             │── Chrome (reconocimiento de Google, necesita internet)
+ │                          │── Whisper suizo-alemán (en el Mac, sin internet)
+ └──────────────────────────┘
+            │ texto original
+            ▼
+ Traductor integrado de Chrome (en el ordenador) + glosario de la iglesia
+            │ texto traducido
+            ▼
+ Pantalla del intérprete: ritmo de lectura ajustable + línea guía
+```
 
 ## Estructura
 
-```text
-apps/api      Backend local de diagnóstico y configuración
-apps/mobile   App React Native/Expo con el pipeline local
-packages/shared  Idiomas, tipos y configuración compartida
+| Carpeta | Qué es | Estado |
+|---|---|---|
+| `apps/web` | La página del apuntador (un solo `index.html`) | **En uso** |
+| `apps/whisper-server` | Servidor local con Whisper ajustado a suizo alemán; también sirve la página | **En uso** |
+| `apps/mobile` | App de iPhone (Expo, iOS 26) | En pausa — ver su README |
+| `packages/shared` | Tipos e idiomas compartidos de la app móvil | Solo para `apps/mobile` |
+| `tests` | Pruebas de la app móvil | Solo para `apps/mobile` |
+
+## Puesta en marcha (Mac con chip Apple)
+
+Una sola vez:
+```bash
+cd apps/whisper-server
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
 ```
 
-## Requisitos
+Cada culto:
+```bash
+npm start            # o: cd apps/whisper-server && .venv/bin/python server.py
+```
+Abre **http://localhost:8765** en Google Chrome (versión 138 o posterior, en ordenador).
 
-- Node.js 22+
-- Expo development build para iOS/Android
-- Modelos locales descargados antes de iniciar una sesión
+1. Pega el enlace del directo y pulsa **Mostrar al lado** (opcional).
+2. Elige el motor: **Whisper** para suizo alemán; **Chrome** para alemán estándar, francés o inglés.
+3. Pulsa **Empezar** y, si usas el audio del directo, comparte la pestaña con **«Compartir audio»**.
+4. Ajusta el **ritmo de lectura** y la **línea guía**.
 
-### Requisitos específicos del modo real (`offline-real`)
+Más detalles: [`apps/web/README.md`](apps/web/README.md) y
+[`apps/whisper-server/README.md`](apps/whisper-server/README.md).
 
-El pipeline real usa exclusivamente frameworks de Apple on-device, sin
-servidores, sin API keys y sin conexión a internet en tiempo de ejecución:
-
-| Etapa | Implementación real | Requisito de plataforma |
-| --- | --- | --- |
-| STT | `SFSpeechRecognizer` con `requiresOnDeviceRecognition = true` | iOS 26.0+, permiso de reconocimiento de voz y micrófono |
-| Traducción ES→DE | `Translation` framework de Apple (`TranslationSession`) | iOS 26.0+, paquete de idioma alemán instalado (se solicita en el primer uso) |
-| TTS | `AVSpeechSynthesizer` | iOS 26.0+ |
-
-No existe implementación de `whisper.cpp` en este repositorio: `WhisperEngine`
-está deliberadamente marcado como *no implementado* (lanza un error explícito
-en vez de simular texto) y queda documentado como prioridad futura si
-`SFSpeechRecognizer` no fuera suficiente para algún dispositivo/idioma.
-
-`NLLBEngine`/`MarianEngine` (basados en diccionario) fueron evaluados y
-eliminados: se decidió usar el framework `Translation` de Apple porque ya
-corre on-device de fábrica, sin necesitar convertir/empaquetar un modelo
-NLLB/MarianMT a CoreML dentro de esta sesión de trabajo.
-
-## Instalación
+## Pruebas
 
 ```bash
-npm install
-cp .env.example .env
+npm run test:server   # lógica del servidor Whisper (no carga el modelo)
 ```
 
-## Ejecutar backend local
+## Privacidad
 
-```bash
-npm run dev:api
-```
+- Motor **Whisper**: el audio no sale del Mac.
+- Motor **Chrome**: el audio se envía a Google para reconocer la voz.
+- La traducción siempre se hace en el ordenador. No se guarda nada salvo lo que el
+  intérprete descargue con el botón **Descargar**.
 
-## Ejecutar móvil
+## Recomendaciones
 
-```bash
-npm run dev:mobile
-```
-
-Para iOS native:
-
-```bash
-cd apps/mobile
-npx expo run:ios --device
-```
-
-## Principio de diseño
-
-La aplicación queda orientada a un pipeline local, sin servicios de pago ni dependencias externas. El flujo se organiza en capas independientes:
-
-- audio capture
-- VAD
-- STT engine
-- transcript manager
-- translation queue
-- TTS queue
-- playback
-
-Cada etapa opera con colas acotadas, backpressure y métricas de latencia. La lógica se mantiene separada de la interfaz.
-
-## `pipelineMode`: `offline-real` vs `demo`
-
-La app expone un `pipelineMode` explícito en `apps/mobile/src/types/pipeline.ts`:
-
-- **`offline-real`** (modo por defecto al iniciar la app): usa exclusivamente
-  `TranslationPipeline.ts`, que habla con el módulo nativo real
-  (`apps/mobile/modules/offline-pipeline`). Nunca contiene texto de ejemplo,
-  nunca usa `Date.now()` para medir latencia, y nunca marca una etapa como
-  completa antes de que el evento nativo correspondiente ocurra realmente.
-- **`demo`**: usa `apps/mobile/src/pipeline/DemoPipeline.ts`, un módulo
-  totalmente separado que reproduce segmentos de ejemplo etiquetados
-  `[DEMO]`/`mode: "demo"`. El modo demo **nunca** puede activarse por
-  accidente en el pipeline real: no comparten estado, colas ni motores.
-
-`useRealtimeTranslator(pipelineMode)` decide cuál de los dos pipelines
-instanciar; el valor por defecto es `"offline-real"`.
-
-## Métricas de latencia (reloj monotónico)
-
-Cada segmento crea su propia `PerformanceTimeline`
-(`apps/mobile/src/performance/PerformanceTimeline.ts`), que registra marcas
-usando `monotonicNowMs()` (`performance.now()`), nunca `Date.now()`. Las
-métricas expuestas son:
-
-```text
-sttLatencyMs         = sttFinal - chunkReady
-translationLatencyMs = translationComplete - translationStart
-ttsLatencyMs         = firstAudio - ttsStart
-endToEndLatencyMs    = firstAudio - speechStart
-```
-
-Si falta una marca, o si la resta diera negativa (lo que indicaría marcas
-fuera de orden), la métrica correspondiente es `null`. Nunca se inventa un
-valor ni se permite un número negativo.
-
-## IDs de segmento
-
-`SegmentIdGenerator` (`apps/mobile/src/pipeline/SegmentIdGenerator.ts`)
-genera IDs monotónicos `segment-000001`, `segment-000002`, ... únicos durante
-toda la sesión. Estos IDs (no timestamps) se usan como `key` de React en la
-UI de transcripción.
-
-## Backpressure sin pérdida de segmentos
-
-`PipelineQueue` nunca descarta automáticamente al hacer `push()`.
-`BackpressureManager.assess()` sólo recomienda reducir la duración del
-próximo segmento capturado y emite una advertencia (`warning`) cuando una
-cola se satura o el *lag* de espera supera el umbral — nunca elimina un
-segmento en cola. `PipelineQueue.dropOldest(true)` existe únicamente para el
-caso en que el usuario haya habilitado explícitamente una política de
-recuperación; ningún código del pipeline llama a esto automáticamente.
-
-## Validación manual en dispositivo real (obligatoria antes de declarar "functional")
-
-Ninguna prueba automatizada dentro de este repositorio puede validar por sí
-sola que el habla real se transcribe/traduce/reproduce correctamente, porque
-eso requiere un micrófono físico, permisos del sistema y los frameworks de
-Apple ejecutándose en iOS real. Antes de considerar el proyecto funcional,
-un humano debe verificar en un dispositivo/simulador con iOS 26+:
-
-1. Abrir la app; debe iniciar en `pipelineMode: "offline-real"`.
-2. Conceder permisos de micrófono y reconocimiento de voz.
-3. En el primer uso, aceptar la descarga del paquete de idioma alemán que
-   solicita el framework `Translation` de Apple.
-4. Decir en voz alta: *"Hoy vamos a estudiar la palabra de Dios."*
-5. Confirmar en la UI:
-   - Aparece un `partial transcript` mientras se habla.
-   - Aparece un `final transcript` en español real (no un texto fijo de
-     ejemplo).
-   - Aparece una traducción real al alemán, y `originalText !== translatedText`.
-   - Se reproduce audio en alemán (TTS) — el marcador `firstAudio` sólo debe
-     registrarse cuando el audio realmente empieza a sonar.
-   - Las métricas de latencia mostradas son todas `>= 0` o `null` (nunca
-     negativas).
-6. Repetir varias frases seguidas y confirmar que no aparecen IDs de
-   segmento duplicados ni eventos `SPEECH_START` repetidos para la misma
-   frase.
-7. Para sesiones largas (orden de 5, 30 y 120 minutos hablando de forma
-   continua), confirmar con Xcode Instruments: memoria acotada (sin
-   crecimiento indefinido), `droppedSegments = 0`, sin transcripciones
-   duplicadas, y que el orden de reproducción del audio traducido coincide
-   con el orden en que se habló.
-
-Las pruebas automatizadas en `tests/pipeline-endurance.test.ts` simulan la
-mecánica de colas/backpressure/IDs para sesiones equivalentes a 5/30/120
-minutos (sin drops, sin duplicados, sin latencias negativas), pero **no
-sustituyen** el paso 7: no miden memoria/CPU real de iOS ni ejecutan los
-frameworks nativos.
+- Guarda el proyecto **fuera de iCloud** (por ejemplo `~/dev/traductor`): iCloud puede
+  quitar archivos del disco mientras se trabaja.
+- La calidad depende sobre todo del audio: mejor un cable desde la mesa de sonido o el
+  audio del directo que un micrófono al fondo de la sala.
