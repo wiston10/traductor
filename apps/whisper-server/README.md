@@ -120,19 +120,22 @@ El motor actual (PyTorch) es el más lento en Mac: en comparativas públicas con
 MLX (el sistema de Apple para sus chips) fue varias veces más rápido. En nuestra prueba de 17 min,
 PyTorch tardó ~2,3 s por paso en un MacBook Air M3: demasiado.
 
-**Probar en 3 pasos:**
+**Probar en 2 comandos** (desde la carpeta principal del proyecto):
 ```bash
-# 1. Convertir el modelo suizo a MLX (una vez, ~5 min; usa el conversor oficial de Apple)
-bash tools/convert_to_mlx.sh
-
-# 2. Comparar motores con el MISMO audio (frases guardadas o una grabación WAV)
-cd apps/whisper-server
-.venv/bin/python bench_asr.py                     # o:  --audio predica.wav
-#    (de .m4a a WAV:  afconvert -f WAVE -d LEI16@16000 -c 1 grabacion.m4a predica.wav)
-
-# 3. Usarlo en directo
-cd ~/Documents/traductor && npm start -- --engine mlx
+npm run setup:mlx   # 1. instala MLX y convierte el modelo suizo (una vez, ~5 min)
+npm run bench       # 2. compara los motores con el mismo audio
 ```
+`npm run bench` no necesita que prepares nada: usa las frases guardadas para entrenamiento o, si no
+hay, genera frases de prédica en alemán con la voz del Mac (sirve para medir la velocidad).
+Con una grabación propia (cualquier formato): `cd apps/whisper-server && .venv/bin/python bench_asr.py --audio grabacion.m4a`.
+
+Si MLX gana, úsalo en directo:  `npm start -- --engine mlx`
+
+**Contexto corto (experimental, `--audio-ctx auto`)**: Whisper siempre procesa bloques de 30 s, aunque la
+frase dure 5 s (el resto es silencio de relleno). Con `auto` solo procesa la duración real + 1 s: mucho
+menos cálculo. Puede afectar al acierto: `npm run bench` lo compara (filas «turbo-corto» y «swiss-corto»).
+En directo: `npm start -- --engine mlx --audio-ctx auto`.
+
 Sin convertir nada también puedes probar el Whisper turbo **normal** (entiende suizo alemán y escribe
 alemán estándar, aunque acierta menos que el ajustado): `npm start -- --engine mlx --model turbo`.
 

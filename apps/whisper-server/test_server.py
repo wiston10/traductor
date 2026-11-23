@@ -171,6 +171,18 @@ def test_motor_mlx_eleccion_de_modelo():
             assert "convert_to_mlx.sh" in str(exc)
 
 
+def test_detector_de_bucles():
+    # Casos reales del contexto corto (bench del 23.11.2026)
+    assert s.looks_broken("Liebe und Besonnenheit. Und ich hörte... ... und ich hörte... ... und ich hörte...")
+    assert s.looks_broken("Ein Jesus kann ein Jesus auf der Pischung ein Säge ein Säge ein Säge")
+    assert s.looks_broken("Ich bitte dich. Du hast siebe. Du hast siebe. Du hast siebe. Du hast siebe.")
+    assert s.looks_broken("Hallo", n_tokens=40, max_tokens=40)          # agotó el límite
+    # Frases buenas: no se repiten
+    assert not s.looks_broken("Denn der Geist, den Gott uns gegeben hat, macht uns nicht.")
+    assert not s.looks_broken("Ich lasse vor, darum bitte ich dich, lass Gottes Gabe voll in dir wirksam werden.")
+    assert not s.looks_broken("")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in dict(globals()).items() if k.startswith("test_")]
     for t in tests:

@@ -32,16 +32,28 @@ if [ ! -d "$REPO/.git" ]; then
 else
   git -C "$REPO" pull --ff-only -q || true
 fi
-"$PY" -m pip install -q -r "$REPO/whisper/requirements.txt"
+# La lista de dependencias del conversor ha cambiado de sitio entre versiones
+for req in "$REPO/whisper/requirements.txt" "$REPO/whisper/mlx_whisper/requirements.txt"; do
+  if [ -f "$req" ]; then "$PY" -m pip install -q -r "$req"; break; fi
+done
 
-echo "3/3 Convirtiendo $MODEL → $OUT"
-cd "$REPO/whisper"
-"$PY" convert.py --torch-name-or-path "$MODEL" --mlx-path "$OUT" --dtype float16
+if [ -f "$OUT/config.json" ] && [ "${FORCE:-0}" != "1" ]; then
+  echo "3/3 El modelo ya estaba convertido en $OUT (para repetir: FORCE=1 bash tools/convert_to_mlx.sh)"
+else
+  echo "3/3 Convirtiendo $MODEL → $OUT  (descarga ~1,6 GB la primera vez)"
+  cd "$REPO/whisper"
+  "$PY" convert.py --torch-name-or-path "$MODEL" --mlx-path "$OUT" --dtype float16
+fi
+
+# mlx-whisper 0.4.x busca «weights.safetensors»; el conversor nuevo guarda «model.safetensors»
+if [ -f "$OUT/model.safetensors" ] && [ ! -f "$OUT/weights.safetensors" ]; then
+  mv "$OUT/model.safetensors" "$OUT/weights.safetensors"
+fi
 
 if [ -f "$OUT/config.json" ]; then
   echo
   echo "✔ Listo. Pruébalo:"
-  echo "    cd apps/whisper-server && .venv/bin/python bench_asr.py"
+  echo "    npm run bench"
   echo "  y en directo:"
   echo "    npm start -- --engine mlx"
 else

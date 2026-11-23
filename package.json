@@ -8,6 +8,8 @@
   ],
   "scripts": {
     "start": "cd apps/whisper-server && .venv/bin/python server.py",
+    "setup:mlx": "bash tools/convert_to_mlx.sh",
+    "bench": "cd apps/whisper-server && .venv/bin/python bench_asr.py",
     "test:server": "cd apps/whisper-server && .venv/bin/python test_server.py",
     "dev:mobile": "npm run start -w @traductor/mobile",
     "typecheck": "npm run typecheck --workspaces --if-present",

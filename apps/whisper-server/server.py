@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import logging
 import time
 from pathlib import Path
@@ -131,7 +132,7 @@ class MlxTranscriber:
     Todas las llamadas van por UN hilo propio: MLX no admite mezclar hilos.
     """
 
-    def __init__(self, model: str, language: str, vocab: str = ""):
+    def __init__(self, model: str, language: str, vocab: str = "", audio_ctx: str = "full"):
         from concurrent.futures import ThreadPoolExecutor
         try:
             import mlx_whisper  # noqa: F401
@@ -142,7 +143,13 @@ class MlxTranscriber:
         self.prompt_text = " ".join(vocab.split()) if vocab else ""
         self.lock = asyncio.Lock()
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx")
-        log.info("Cargando %s con MLX… la primera vez se descarga", self.model)
+        # «auto»: el codificador de Whisper procesa solo la duración real de la frase (+1 s)
+        # en vez de 30 s rellenos de silencio. Mucho menos cálculo; EXPERIMENTAL (comparar textos).
+        self.short = audio_ctx == "auto"
+        self.fallbacks = 0            # frases que hubo que repetir con el contexto completo
+        self._model = None
+        log.info("Cargando %s con MLX%s… la primera vez se descarga", self.model,
+                 " (contexto corto)" if self.short else "")
         self._call(np.zeros(SAMPLE_RATE, dtype=np.float32))            # carga + calentamiento
         t0 = time.monotonic()
         self._call(np.zeros(5 * SAMPLE_RATE, dtype=np.float32))
@@ -157,6 +164,8 @@ class MlxTranscriber:
     _run = _call
 
     def _transcribe_blocking(self, audio: np.ndarray) -> str:
+        if self.short:
+            return self._short_blocking(audio)
         import mlx_whisper
         out = mlx_whisper.transcribe(
             audio.astype(np.float32),
@@ -170,15 +179,72 @@ class MlxTranscriber:
         )
         return strip_prompt((out.get("text") or "").strip(), self.prompt_text)
 
+    def _decode_ctx(self, audio: np.ndarray, ctx: int | None, max_tokens: int | None) -> tuple[str, object]:
+        """Codifica el audio con un contexto de «ctx» posiciones (None = los 30 s completos) y decodifica."""
+        import mlx.core as mx
+        import mlx.nn as nn
+        from mlx_whisper.audio import log_mel_spectrogram, pad_or_trim
+        from mlx_whisper.decoding import DecodingOptions, decode
+        from mlx_whisper.load_models import load_model
+
+        if self._model is None:
+            self._model = load_model(self.model, dtype=mx.float16)
+        m = self._model
+        full_ctx = m.dims.n_audio_ctx
+        mel = log_mel_spectrogram(audio.astype(np.float32), n_mels=m.dims.n_mels)
+        if ctx is None:
+            ctx = full_ctx
+        ctx = min(full_ctx, ctx)
+        mel = pad_or_trim(mel, ctx * 2, axis=-2).astype(mx.float16)[None]
+
+        enc = m.encoder                                           # codificador con posiciones recortadas
+        x = nn.gelu(enc.conv1(mel))
+        x = nn.gelu(enc.conv2(x))
+        x = x + enc._positional_embedding[: x.shape[1]]
+        for block in enc.blocks:
+            x, _, _ = block(x)
+        features = enc.ln_post(x)
+
+        m.dims.n_audio_ctx = ctx      # así decode() reconoce las características ya calculadas
+        try:
+            res = decode(m, features, DecodingOptions(
+                language=self.language, task="transcribe", temperature=0.0, sample_len=max_tokens,
+                without_timestamps=True, fp16=True, prompt=self.prompt_text or None))
+        finally:
+            m.dims.n_audio_ctx = full_ctx
+        r = res[0] if isinstance(res, list) else res
+        return strip_prompt((r.text or "").strip(), self.prompt_text), r
+
+    def _short_blocking(self, audio: np.ndarray) -> str:
+        """
+        Contexto corto (como «audio_ctx» de whisper.cpp): procesa la duración real + 1 s en vez de 30 s.
+        Su fallo típico son los bucles («haben wir Sachen, haben wir Sachen…»), así que:
+          - se limita la respuesta a lo que cabe en la duración de la frase, y
+          - si sale repetitiva o demasiado larga, se repite con el contexto completo (más lento, fiable).
+        """
+        secs = len(audio) / SAMPLE_RATE
+        frames = int(secs * SAMPLE_RATE / 160) + 1
+        max_tokens = int(secs * 7) + 12                 # ~4 tokens/s al hablar rápido, con margen
+        text, r = self._decode_ctx(audio, (frames + 1) // 2 + 50, max_tokens)
+        if r.no_speech_prob > 0.6 and r.avg_logprob < -1.0:      # silencio/ruido
+            return ""
+        if looks_broken(text, len(r.tokens), max_tokens):
+            self.fallbacks += 1
+            text, r = self._decode_ctx(audio, None, None)
+            if r.no_speech_prob > 0.6 and r.avg_logprob < -1.0:
+                return ""
+        return text
+
     async def transcribe(self, audio: np.ndarray) -> str:
         async with self.lock:
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(self._pool, self._transcribe_blocking, audio)
 
 
-def make_transcriber(engine: str, model: str, device: str | None, language: str, vocab: str = ""):
+def make_transcriber(engine: str, model: str, device: str | None, language: str, vocab: str = "",
+                     audio_ctx: str = "full"):
     if engine == "mlx":
-        return MlxTranscriber(model, language, vocab)
+        return MlxTranscriber(model, language, vocab, audio_ctx)
     return Transcriber(model, device, language, vocab)
 
 
@@ -194,6 +260,26 @@ HALLUCINATIONS = {
     "copyright wdr",
     "swr 2020",
 }
+
+
+def looks_broken(text: str, n_tokens: int = 0, max_tokens: int = 0) -> bool:
+    """¿La transcripción está en bucle o es anormalmente larga? (fallo típico del contexto corto)"""
+    import zlib
+    t = text.strip()
+    if not t:
+        return False
+    if max_tokens and n_tokens >= max_tokens:               # agotó el límite: casi seguro un bucle
+        return True
+    words = re.findall(r"\w+", t.lower())
+    if len(words) >= 6:
+        trigrams = [tuple(words[i:i + 3]) for i in range(len(words) - 2)]
+        if max(trigrams.count(g) for g in set(trigrams)) >= 3:   # la misma secuencia 3 veces o más
+            return True
+        bigrams = [tuple(words[i:i + 2]) for i in range(len(words) - 1)]
+        if max(bigrams.count(g) for g in set(bigrams)) >= 3:     # «ein Säge ein Säge ein Säge»
+            return True
+    data = t.encode("utf-8")
+    return len(data) > 60 and len(data) / len(zlib.compress(data)) > 2.2   # texto muy repetitivo
 
 
 def strip_prompt(text: str, prompt: str) -> str:
@@ -571,6 +657,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Servidor Whisper local para suizo alemán")
     parser.add_argument("--engine", choices=("torch", "mlx"), default="torch",
                         help="Motor: torch (actual) o mlx (Apple, mucho más rápido en Mac; ver README)")
+    parser.add_argument("--audio-ctx", choices=("full", "auto"), default="full",
+                        help="Solo MLX. auto = procesar solo la duración real de cada frase (mucho más rápido, "
+                             "experimental: comprobar con bench_asr.py que acierta igual)")
     parser.add_argument("--model", default=DEFAULT_MODEL,
                         help="Modelo (por defecto: Whisper turbo ajustado a suizo alemán). "
                              "Con --engine mlx también: «turbo» (Whisper turbo normal, sin conversión)")
@@ -625,14 +714,15 @@ def main() -> None:
             vocab = " ".join(vp.read_text(encoding="utf-8").split())
         else:
             log.warning("No existe el vocabulario %s: se sigue sin él", vp)
-    app["transcriber"] = make_transcriber(args.engine, args.model, args.device, args.language, vocab)
+    app["transcriber"] = make_transcriber(args.engine, args.model, args.device, args.language, vocab,
+                                          args.audio_ctx)
     app.router.add_get("/", index)
     app.router.add_get("/ws", ws_handler)
     app["data_dir"] = Path(args.data_dir)
     app.router.add_get("/corregir", corregir)
     app["idea"] = IdeaClient(args.idea_model, input_mode=args.idea_input)
     app["metrics"] = Metrics(Path(__file__).resolve().parent / "metrics", enabled=not args.no_metrics)
-    app["metrics"].log("start", model=args.model, engine=args.engine, idea_model=args.idea_model, idea_input=args.idea_input,
+    app["metrics"].log("start", model=args.model, engine=args.engine, audio_ctx=args.audio_ctx, idea_model=args.idea_model, idea_input=args.idea_input,
                        max_seg=args.max_seg, partial_every=args.partial_every, vocab=bool(args.vocab))
     app.router.add_get("/api/idea/status", api_idea_status)
     app.router.add_post("/api/idea", api_idea)

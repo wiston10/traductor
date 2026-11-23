@@ -80,6 +80,8 @@ def main() -> None:
     ap.add_argument("--model", help="Volver a transcribir las sesiones de prueba con este modelo")
     ap.add_argument("--vocab", nargs="?", const=str(HERE / "vocab" / "de.txt"), default="")
     ap.add_argument("--engine", choices=("torch", "mlx"), default="torch", help="Motor para --model")
+    ap.add_argument("--audio-ctx", choices=("full", "auto"), default="full",
+                    help="Solo MLX: auto = contexto corto (más rápido, experimental)")
     ap.add_argument("--csv", help="Guardar el detalle frase a frase en este CSV")
     args = ap.parse_args()
     root = Path(args.data_dir)
@@ -93,7 +95,7 @@ def main() -> None:
     if args.model:
         from server import make_transcriber  # carga el motor solo si hace falta
         vocab = " ".join(Path(args.vocab).read_text(encoding="utf-8").split()) if args.vocab else ""
-        tr = make_transcriber(args.engine, args.model, None, "de", vocab)
+        tr = make_transcriber(args.engine, args.model, None, "de", vocab, args.audio_ctx)
         rows = []
         segs = list(done_segments(root, "test"))
         for i, (s, d, seg) in enumerate(segs, 1):
@@ -101,7 +103,8 @@ def main() -> None:
             rows.append((s["id"], seg["text"], hyp))
             print(f"\r  transcribiendo {i}/{len(segs)}…", end="", flush=True)
         print()
-        report(f"MODELO {args.model} [{args.engine}]{' + vocab' if vocab else ''} (sesiones de prueba)", rows)
+        corto = " · contexto corto" if args.audio_ctx == "auto" else ""
+        report(f"MODELO {args.model} [{args.engine}{corto}]{' + vocab' if vocab else ''} (sesiones de prueba)", rows)
 
     if args.csv:
         with open(args.csv, "w", newline="", encoding="utf-8") as f:
