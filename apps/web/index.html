@@ -565,7 +565,7 @@
   }
 
   // ---------- modo idea (LLM local vía el servidor) ----------
-  const idea = { items: [], context: [], pending: [], busy: false, warned: false };
+  const idea = { items: [], context: [], pending: [], busy: false, warned: false, paused: false };
   function serverBase() {
     if (location.protocol.startsWith("http") && location.port === "8765") return "";
     const ws = (el.whisperUrl.value.trim() || DEFAULT_WS);
@@ -575,7 +575,8 @@
     const items = idea.items.slice(el.viewMode.value === "ideas" ? -12 : -3);
     el.ideaPanel.innerHTML = items.map((it, i) =>
       `<div class="idea${i === items.length - 1 ? " now" : ""}${it.wait ? " wait" : ""}">💡 ${escapeHtml(it.text)}` +
-      (it.ms ? `<span class="ms">${(it.ms / 1000).toFixed(1)} s</span>` : "") + "</div>").join("");
+      (it.ms ? `<span class="ms">${(it.ms / 1000).toFixed(1)} s</span>` : "") + "</div>").join("") +
+      (idea.paused ? `<div class="idea wait">⏸ Ideas en pausa: el Mac va justo y la transcripción tiene prioridad. Se reanudan solas.</div>` : "");
   }
   // La idea se pide con el original (con glosario) y la traducción literal: al modelo pequeño
   // le resulta mucho más fácil condensar en español que entender y traducir a la vez.
@@ -601,6 +602,7 @@
       });
       const data = await r.json();
       if (data.error) throw new Error(data.error);
+      if (idea.paused !== Boolean(data.paused)) { idea.paused = Boolean(data.paused); renderIdeas(); }
       if (!data.busy && data.idea && !/^[.…\s]*$/.test(data.idea)) {
         idea.items.push({ text: data.idea, ms: data.ms });
         if (idea.items.length > 200) idea.items.splice(0, 50);

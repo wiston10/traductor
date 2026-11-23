@@ -73,6 +73,11 @@ python3 tools/build_glossary.py  # genera apps/web/glossary/*.json y apps/whispe
 Para corregir un término, añádelo en **Ajustes → tus términos** (manda sobre el incorporado)
 o, si es un error del generador, en `BLACKLIST`/`MODERN` dentro de `tools/build_glossary.py`.
 
+## Antes de usarlo en un culto
+
+Sigue [`CULTO_DE_PRUEBA.md`](CULTO_DE_PRUEBA.md): lista de comprobación, qué observar y cómo
+sacar el informe automático de rendimiento (`apps/whisper-server/report.py`).
+
 ## Pruebas
 
 ```bash

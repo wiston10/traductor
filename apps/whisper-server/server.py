@@ -27,6 +27,7 @@ from aiohttp import WSMsgType, web
 
 import training_store as store
 from idea import IdeaClient
+from metrics import Metrics
 
 SAMPLE_RATE = 16000
 FRAME = 480  # 30 ms
@@ -308,6 +309,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                 continue
             took = time.monotonic() - t0
             seg.note_cost(took)
+            app["metrics"].whisper_step(kind, len(audio) / SAMPLE_RATE, took)
             log.debug("%s %.1fs audio en %.2fs: %s", kind, len(audio) / SAMPLE_RATE, took, text)
             if is_hallucination(text) or echoes_prompt(text, transcriber.prompt_text):
                 if kind == "final":
@@ -450,11 +452,20 @@ async def api_idea(request: web.Request) -> web.Response:
         raise web.HTTPBadRequest(text="Petición no válida")
     if not latest.strip():
         return _cors(request, web.json_response({"idea": "", "ms": 0}))
+    metrics: Metrics = request.app["metrics"]
+    # Protección: la transcripción es lo esencial. Si Whisper va lento, las ideas esperan.
+    if metrics.whisper_overloaded(request.app["args"].idea_pause):
+        metrics.log("idea", ms=0, result="paused", whisper_cost=round(metrics.whisper_cost, 2))
+        return _cors(request, web.json_response({"paused": True, "whisper_cost": round(metrics.whisper_cost, 1)}))
     try:
         result = await request.app["idea"].idea(context, latest, src, tgt, literal, context_literal)
     except Exception as exc:  # noqa: BLE001
         log.warning("Modo idea: %s", exc)
+        metrics.log("idea", ms=0, result="error", error=str(exc)[:120])
         return _cors(request, web.json_response({"error": str(exc)[:200]}, status=503))
+    outcome = ("busy" if result.get("busy") else "error" if result.get("error")
+               else "ok" if result.get("idea") else "empty")
+    metrics.log("idea", ms=result.get("ms", 0), result=outcome)
     return _cors(request, web.json_response(result))
 
 
@@ -493,6 +504,10 @@ def main() -> None:
     parser.add_argument("--idea-input", choices=("ambos", "literal"), default="literal",
                         help="Qué recibe el modelo: solo la traducción literal (por defecto: más fiel en las "
                              "pruebas con gemma3:4b) u original + traducción literal")
+    parser.add_argument("--idea-pause", type=float, default=2.0, metavar="SEG",
+                        help="Pausar el modo idea mientras Whisper tarde más de SEG por paso (protege la transcripción)")
+    parser.add_argument("--no-metrics", action="store_true",
+                        help="No guardar el registro de rendimiento en metrics/")
     parser.add_argument("--allow-origin", action="append", default=[],
                         help="Permitir otra web (p. ej. https://usuario.github.io). Repetible.")
     parser.add_argument("--verbose", action="store_true")
@@ -525,6 +540,9 @@ def main() -> None:
     app["data_dir"] = Path(args.data_dir)
     app.router.add_get("/corregir", corregir)
     app["idea"] = IdeaClient(args.idea_model, input_mode=args.idea_input)
+    app["metrics"] = Metrics(Path(__file__).resolve().parent / "metrics", enabled=not args.no_metrics)
+    app["metrics"].log("start", model=args.model, idea_model=args.idea_model, idea_input=args.idea_input,
+                       max_seg=args.max_seg, partial_every=args.partial_every, vocab=bool(args.vocab))
     app.router.add_get("/api/idea/status", api_idea_status)
     app.router.add_post("/api/idea", api_idea)
 

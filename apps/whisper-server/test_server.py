@@ -121,6 +121,24 @@ def test_modo_idea():
     assert idea.clean_output("The user wants...\n</think>\n\nDios ama al mundo.") == "Dios ama al mundo."
 
 
+def test_metricas_y_pausa():
+    import tempfile
+    from pathlib import Path
+    import metrics as M
+    m = M.Metrics(Path(tempfile.mkdtemp()) / "metrics")
+    for _ in range(5):
+        m.whisper_step("partial", 4, 0.8)
+    assert not m.whisper_overloaded(2.0)                 # va bien: ideas permitidas
+    for _ in range(6):
+        m.whisper_step("partial", 6, 3.2)
+    assert m.whisper_overloaded(2.0)                     # va lento: ideas en pausa
+    m.whisper_cost_at -= 25
+    assert not m.whisper_overloaded(2.0)                 # silencio: se reanuda
+    m.log("idea", ms=4000, result="ok")
+    lines = m.path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 12 and '"ev": "idea"' in lines[-1]
+
+
 if __name__ == "__main__":
     tests = [v for k, v in dict(globals()).items() if k.startswith("test_")]
     for t in tests:

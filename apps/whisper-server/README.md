@@ -106,3 +106,10 @@ Cosas a saber:
 - En un Mac de 16 GB compite con Whisper por la memoria y la gráfica. Si aparece «Whisper va lento»,
   vuelve a la vista «Traducción».
 - Puede equivocarse o simplificar de más: es una ayuda, no una fuente. Pruébalo antes de usarlo un domingo.
+
+## Rendimiento y protección
+
+- El servidor guarda un registro de rendimiento en `metrics/` (no va a git; desactivar con `--no-metrics`).
+  `.venv/bin/python report.py` lo resume por tramos de 10 minutos y avisa si el Mac se fue calentando.
+- **Protección:** si Whisper tarda más de 2 s por paso de forma sostenida, el modo idea se pausa solo
+  («⏸ Ideas en pausa») y se reanuda cuando el Mac se recupera. Cambiar el umbral: `--idea-pause 3`.
