@@ -81,6 +81,21 @@ def main() -> None:
               f"{paused:>8}")
 
     all_w = [e["took_s"] for e in whisper]
+    finals = [e for e in whisper if e.get("kind") == "final"]
+    partials = [e for e in whisper if e.get("kind") == "partial"]
+    audio_total = sum(e.get("audio_s", 0) for e in finals)
+    print(f"\nActividad: {len(finals)} frases definitivas ({audio_total / 60:.1f} min de voz), "
+          f"{len(partials)} pasos provisionales, {len(ideas)} peticiones de idea.")
+    if finals:
+        tf = [e["took_s"] for e in finals]
+        print(f"  Frase definitiva: {statistics.median([e.get('audio_s', 0) for e in finals]):.1f} s de audio, "
+              f"tarda {statistics.median(tf):.2f} s en transcribirse (peor {pct(tf, 90):.2f} s).")
+    if partials:
+        tp = [e["took_s"] for e in partials]
+        print(f"  Paso provisional: tarda {statistics.median(tp):.2f} s (peor {pct(tp, 90):.2f} s).")
+    if dur > 3 and len(finals) < dur * 3:
+        print("  ⚠ Muy pocas frases para el tiempo transcurrido: ¿hubo poca voz (música, silencio), "
+              "volumen bajo, o se quedó parado?")
     ok_all = [e["ms"] / 1000 for e in ideas if e.get("result") == "ok"]
     counts = {r: sum(1 for e in ideas if e.get("result") == r) for r in ("ok", "empty", "paused", "error", "busy")}
     print("\nConclusiones:")

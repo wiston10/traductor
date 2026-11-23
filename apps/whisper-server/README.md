@@ -113,3 +113,30 @@ Cosas a saber:
   `.venv/bin/python report.py` lo resume por tramos de 10 minutos y avisa si el Mac se fue calentando.
 - **Protección:** si Whisper tarda más de 2 s por paso de forma sostenida, el modo idea se pausa solo
   («⏸ Ideas en pausa») y se reanuda cuando el Mac se recupera. Cambiar el umbral: `--idea-pause 3`.
+
+## Motor MLX (más rápido en Mac) — opcional, en pruebas
+
+El motor actual (PyTorch) es el más lento en Mac: en comparativas públicas con el mismo modelo,
+MLX (el sistema de Apple para sus chips) fue varias veces más rápido. En nuestra prueba de 17 min,
+PyTorch tardó ~2,3 s por paso en un MacBook Air M3: demasiado.
+
+**Probar en 3 pasos:**
+```bash
+# 1. Convertir el modelo suizo a MLX (una vez, ~5 min; usa el conversor oficial de Apple)
+bash tools/convert_to_mlx.sh
+
+# 2. Comparar motores con el MISMO audio (frases guardadas o una grabación WAV)
+cd apps/whisper-server
+.venv/bin/python bench_asr.py                     # o:  --audio predica.wav
+#    (de .m4a a WAV:  afconvert -f WAVE -d LEI16@16000 -c 1 grabacion.m4a predica.wav)
+
+# 3. Usarlo en directo
+cd ~/Documents/traductor && npm start -- --engine mlx
+```
+Sin convertir nada también puedes probar el Whisper turbo **normal** (entiende suizo alemán y escribe
+alemán estándar, aunque acierta menos que el ajustado): `npm start -- --engine mlx --model turbo`.
+
+Para medir el acierto (no solo la velocidad) con frases corregidas:
+`.venv/bin/python evaluate.py --engine mlx --model Flurin17/whisper-large-v3-turbo-swiss-german`
+
+PyTorch sigue siendo el motor por defecto hasta que MLX se valide en vuestro Mac.

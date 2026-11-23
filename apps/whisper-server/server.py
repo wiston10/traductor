@@ -38,7 +38,16 @@ log = logging.getLogger("whisper-server")
 # ---------------------------------------------------------------------------
 # Modelo
 # ---------------------------------------------------------------------------
+DEFAULT_MODEL = "Flurin17/whisper-large-v3-turbo-swiss-german"
+HERE = Path(__file__).resolve().parent
+# Dónde deja tools/convert_to_mlx.sh el modelo suizo convertido a MLX
+MLX_SWISS_PATH = HERE / "models" / "swiss-german-turbo-mlx"
+MLX_ALIASES = {"turbo": "mlx-community/whisper-large-v3-turbo"}
+
+
 class Transcriber:
+    """Motor PyTorch (transformers). Funciona en cualquier sitio; en Mac es el más lento."""
+
     def __init__(self, model_id: str, device: str | None, language: str, vocab: str = ""):
         import torch
         from transformers import pipeline
@@ -99,6 +108,78 @@ class Transcriber:
     async def transcribe(self, audio: np.ndarray) -> str:
         async with self.lock:  # un solo modelo: una inferencia a la vez
             return await asyncio.to_thread(self._run, audio)
+
+
+def resolve_mlx_model(model: str) -> str:
+    """Qué modelo MLX cargar. El suizo hay que convertirlo antes (tools/convert_to_mlx.sh)."""
+    if model in MLX_ALIASES:
+        return MLX_ALIASES[model]
+    if model == DEFAULT_MODEL:
+        if (MLX_SWISS_PATH / "config.json").exists():
+            return str(MLX_SWISS_PATH)
+        raise SystemExit(
+            "El modelo suizo todavía no está convertido a MLX.\n"
+            "  Conviértelo (una vez):   bash tools/convert_to_mlx.sh\n"
+            "  o prueba el turbo normal: python3 server.py --engine mlx --model turbo")
+    return model
+
+
+class MlxTranscriber:
+    """
+    Motor MLX (mlx-whisper): el sistema de Apple para sus chips. En las comparativas
+    publicadas, varias veces más rápido que PyTorch en Mac con el mismo modelo.
+    Todas las llamadas van por UN hilo propio: MLX no admite mezclar hilos.
+    """
+
+    def __init__(self, model: str, language: str, vocab: str = ""):
+        from concurrent.futures import ThreadPoolExecutor
+        try:
+            import mlx_whisper  # noqa: F401
+        except ImportError:
+            raise SystemExit("Falta mlx-whisper. Instálalo:  .venv/bin/pip install -r requirements-mlx.txt")
+        self.model = resolve_mlx_model(model)
+        self.language = language
+        self.prompt_text = " ".join(vocab.split()) if vocab else ""
+        self.lock = asyncio.Lock()
+        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx")
+        log.info("Cargando %s con MLX… la primera vez se descarga", self.model)
+        self._call(np.zeros(SAMPLE_RATE, dtype=np.float32))            # carga + calentamiento
+        t0 = time.monotonic()
+        self._call(np.zeros(5 * SAMPLE_RATE, dtype=np.float32))
+        log.info("Modelo listo (MLX). Un paso tarda ~%.2fs (ideal: menos de 1s).", time.monotonic() - t0)
+        if self.prompt_text:
+            log.info("Vocabulario activo")
+
+    def _call(self, audio: np.ndarray) -> str:
+        return self._pool.submit(self._transcribe_blocking, audio).result()
+
+    # Mismo nombre que en el motor PyTorch (lo usa evaluate.py)
+    _run = _call
+
+    def _transcribe_blocking(self, audio: np.ndarray) -> str:
+        import mlx_whisper
+        out = mlx_whisper.transcribe(
+            audio.astype(np.float32),
+            path_or_hf_repo=self.model,
+            language=self.language,
+            task="transcribe",
+            temperature=0.0,                    # una sola pasada: sin reintentos (más rápido)
+            condition_on_previous_text=False,   # cada frase es independiente
+            initial_prompt=self.prompt_text or None,
+            verbose=None,
+        )
+        return strip_prompt((out.get("text") or "").strip(), self.prompt_text)
+
+    async def transcribe(self, audio: np.ndarray) -> str:
+        async with self.lock:
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(self._pool, self._transcribe_blocking, audio)
+
+
+def make_transcriber(engine: str, model: str, device: str | None, language: str, vocab: str = ""):
+    if engine == "mlx":
+        return MlxTranscriber(model, language, vocab)
+    return Transcriber(model, device, language, vocab)
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +297,12 @@ class Segmenter:
 
         # Intervalo adaptativo: nunca pedir parciales más rápido de lo que el Mac
         # puede procesarlos (deja hueco para que los finales no esperen).
+        if self.partial_every <= 0:          # texto provisional desactivado: solo frases definitivas
+            return None, None
+        # Si ya empieza una pausa, la frase definitiva es inminente: un paso provisional
+        # ahora solo la retrasaría (el modelo hace una cosa a la vez).
+        if trailing_s >= 0.2:
+            return None, None
         interval = max(self.partial_every, self.step_cost * 1.5)
         grown = len(self.buf) - self.last_partial_len >= int(0.4 * SAMPLE_RATE)
         if now - self.last_partial >= interval and self.seconds >= 0.6 and grown:
@@ -482,14 +569,18 @@ async def index(request: web.Request) -> web.StreamResponse:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Servidor Whisper local para suizo alemán")
-    parser.add_argument("--model", default="Flurin17/whisper-large-v3-turbo-swiss-german",
-                        help="Modelo de Hugging Face (por defecto: Whisper turbo ajustado a suizo alemán)")
+    parser.add_argument("--engine", choices=("torch", "mlx"), default="torch",
+                        help="Motor: torch (actual) o mlx (Apple, mucho más rápido en Mac; ver README)")
+    parser.add_argument("--model", default=DEFAULT_MODEL,
+                        help="Modelo (por defecto: Whisper turbo ajustado a suizo alemán). "
+                             "Con --engine mlx también: «turbo» (Whisper turbo normal, sin conversión)")
     parser.add_argument("--language", default="de", help="Idioma de salida de Whisper (de = alemán estándar)")
     parser.add_argument("--device", default=None, help="mps | cuda | cpu (por defecto, el mejor disponible)")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--partial-every", type=float, default=1.0,
-                        help="Segundos entre textos provisionales (más bajo = más rápido, más carga)")
+                        help="Segundos entre textos provisionales (más bajo = más rápido, más carga; "
+                             "0 = desactivar: solo frases definitivas, la mitad de trabajo)")
     parser.add_argument("--silence", type=float, default=0.5,
                         help="Pausa (s) que cierra una frase")
     parser.add_argument("--max-seg", type=float, default=6.0,
@@ -534,14 +625,14 @@ def main() -> None:
             vocab = " ".join(vp.read_text(encoding="utf-8").split())
         else:
             log.warning("No existe el vocabulario %s: se sigue sin él", vp)
-    app["transcriber"] = Transcriber(args.model, args.device, args.language, vocab)
+    app["transcriber"] = make_transcriber(args.engine, args.model, args.device, args.language, vocab)
     app.router.add_get("/", index)
     app.router.add_get("/ws", ws_handler)
     app["data_dir"] = Path(args.data_dir)
     app.router.add_get("/corregir", corregir)
     app["idea"] = IdeaClient(args.idea_model, input_mode=args.idea_input)
     app["metrics"] = Metrics(Path(__file__).resolve().parent / "metrics", enabled=not args.no_metrics)
-    app["metrics"].log("start", model=args.model, idea_model=args.idea_model, idea_input=args.idea_input,
+    app["metrics"].log("start", model=args.model, engine=args.engine, idea_model=args.idea_model, idea_input=args.idea_input,
                        max_seg=args.max_seg, partial_every=args.partial_every, vocab=bool(args.vocab))
     app.router.add_get("/api/idea/status", api_idea_status)
     app.router.add_post("/api/idea", api_idea)

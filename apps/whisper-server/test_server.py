@@ -49,6 +49,27 @@ def test_sin_pausas_corta_a_tiempo():
     assert len(finals) >= 2 and all(f <= 6.01 for f in finals), finals
 
 
+def test_sin_texto_provisional():
+    seg = s.Segmenter(0, 0.5, 6.0)                 # --partial-every 0
+    audio = np.concatenate([sil(0.5), voice(3), sil(1)])
+    kinds = []
+    now = 0.0
+    for i in range(0, len(audio), 1600):
+        seg.add((audio[i:i + 1600] * 32767).astype(np.int16).tobytes())
+        now += 0.1
+        k, _ = seg.decide(now)
+        if k:
+            kinds.append(k)
+    assert kinds == ["final"], kinds
+
+
+def test_no_provisional_si_la_frase_acaba():
+    seg = s.Segmenter(1.0, 0.5, 6.0)
+    seg.add((np.concatenate([sil(0.3), voice(2), sil(0.3)]) * 32767).astype(np.int16).tobytes())
+    k, _ = seg.decide(10.0)                        # 0,3 s de pausa al final: la frase está acabando
+    assert k is None, k
+
+
 def test_flush():
     _, seg = run(np.concatenate([sil(0.5), voice(2.0)]))
     assert seg.flush() is not None and seg.seconds == 0
@@ -137,6 +158,17 @@ def test_metricas_y_pausa():
     m.log("idea", ms=4000, result="ok")
     lines = m.path.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 12 and '"ev": "idea"' in lines[-1]
+
+
+def test_motor_mlx_eleccion_de_modelo():
+    assert s.resolve_mlx_model("turbo") == "mlx-community/whisper-large-v3-turbo"
+    assert s.resolve_mlx_model("mlx-community/otro") == "mlx-community/otro"
+    if not (s.MLX_SWISS_PATH / "config.json").exists():
+        try:
+            s.resolve_mlx_model(s.DEFAULT_MODEL)
+            raise AssertionError("debía pedir la conversión")
+        except SystemExit as exc:
+            assert "convert_to_mlx.sh" in str(exc)
 
 
 if __name__ == "__main__":

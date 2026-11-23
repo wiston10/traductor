@@ -167,7 +167,7 @@ class IdeaClient:
                                            input_mode=input_mode or self.input_mode,
                                            context_literal=context_literal),
                 "stream": False,
-                "keep_alive": "30m",        # mantener el modelo cargado durante el culto
+                "keep_alive": "5m",         # cargado mientras se usa; se libera la memoria a los 5 min sin uso
                 "options": {"temperature": 0.2, "num_predict": 48, "num_ctx": 2048},
             }
             if self.model.startswith("qwen3"):
