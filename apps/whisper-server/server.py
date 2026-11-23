@@ -667,9 +667,10 @@ def main() -> None:
     parser.add_argument("--device", default=None, help="mps | cuda | cpu (por defecto, el mejor disponible)")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--partial-every", type=float, default=1.0,
-                        help="Segundos entre textos provisionales (más bajo = más rápido, más carga; "
-                             "0 = desactivar: solo frases definitivas, la mitad de trabajo)")
+    parser.add_argument("--partial-every", type=float, default=0.0,
+                        help="Segundos entre textos provisionales. Por defecto 0 = desactivado: solo frases "
+                             "definitivas. Medido en un MacBook Air M3: con provisionales, 1 min de voz pedía "
+                             "~78 s de cálculo y se quedaba atrás; sin ellos, ~30 s. Activar en Mac potentes: 1.0")
     parser.add_argument("--silence", type=float, default=0.5,
                         help="Pausa (s) que cierra una frase")
     parser.add_argument("--max-seg", type=float, default=6.0,

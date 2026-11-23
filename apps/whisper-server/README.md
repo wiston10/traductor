@@ -114,6 +114,19 @@ Cosas a saber:
 - **Protección:** si Whisper tarda más de 2 s por paso de forma sostenida, el modo idea se pausa solo
   («⏸ Ideas en pausa») y se reanuda cuando el Mac se recupera. Cambiar el umbral: `--idea-pause 3`.
 
+## Configuración recomendada (medida el 23.11.2026 en un MacBook Air M3, 16 GB)
+
+| Motor | Tiempo por frase | Acierto |
+|---|---|---|
+| **PyTorch + modelo suizo (por defecto)** | **~1,7 s** | **el mejor** |
+| MLX + modelo suizo | ~2,0 s | igual |
+| MLX + modelo suizo + contexto corto | ~1,3 s | peor (palabras cambiadas, frases duplicadas) |
+| MLX + turbo normal + contexto corto | ~0,7 s | bastante peor (mezcla idiomas) |
+
+Conclusión: en este Mac se queda **PyTorch + modelo suizo**. El texto provisional está **desactivado por
+defecto** (duplicaba el trabajo y el Mac se quedaba atrás); cada frase aparece entera ~2 s después de decirse.
+En un Mac más potente se puede activar: `npm start -- --partial-every 1`.
+
 ## Motor MLX (más rápido en Mac) — opcional, en pruebas
 
 El motor actual (PyTorch) es el más lento en Mac: en comparativas públicas con el mismo modelo,
