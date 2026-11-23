@@ -64,6 +64,18 @@ def test_origenes():
     assert s.origin_allowed("https://x.github.io", ["https://x.github.io"])
 
 
+def test_vocabulario():
+    vocab = "Predigt im Gottesdienst. Jesus Christus, Heiliger Geist, Johannes, Petrus, Paulus."
+    # Si transformers devuelve el vocabulario delante, se quita
+    assert s.strip_prompt(vocab + " Heute lesen wir Johannes.", vocab) == "Heute lesen wir Johannes."
+    assert s.strip_prompt("Heute lesen wir.", vocab) == "Heute lesen wir."
+    # Whisper "leyendo" la lista en el silencio: se descarta
+    assert s.echoes_prompt("Johannes, Petrus, Paulus.", vocab)
+    # Una frase normal que menciona nombres de la lista: NO se descarta
+    assert not s.echoes_prompt("Heute lesen wir, was Petrus und Johannes sagten.", vocab)
+    assert not s.echoes_prompt("Johannes und Petrus", "")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in dict(globals()).items() if k.startswith("test_")]
     for t in tests:

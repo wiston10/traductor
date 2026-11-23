@@ -59,6 +59,20 @@ Abre **http://localhost:8765** en Google Chrome (versión 138 o posterior, en or
 Más detalles: [`apps/web/README.md`](apps/web/README.md) y
 [`apps/whisper-server/README.md`](apps/whisper-server/README.md).
 
+## Glosario bíblico
+
+La página trae un glosario incorporado (alemán, francés e inglés → español) con unos
+600 nombres bíblicos, libros y términos de iglesia por idioma. Se genera a partir de
+Biblias antiguas de dominio público:
+
+```bash
+python3 tools/fetch_bibles.py    # una vez: descarga las Biblias a data/bibles/ (no van a git)
+python3 tools/build_glossary.py  # genera apps/web/glossary/*.json y apps/whisper-server/vocab/de.txt
+```
+
+Para corregir un término, añádelo en **Ajustes → tus términos** (manda sobre el incorporado)
+o, si es un error del generador, en `BLACKLIST`/`MODERN` dentro de `tools/build_glossary.py`.
+
 ## Pruebas
 
 ```bash

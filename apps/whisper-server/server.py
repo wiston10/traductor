@@ -35,7 +35,7 @@ log = logging.getLogger("whisper-server")
 # Modelo
 # ---------------------------------------------------------------------------
 class Transcriber:
-    def __init__(self, model_id: str, device: str | None, language: str):
+    def __init__(self, model_id: str, device: str | None, language: str, vocab: str = ""):
         import torch
         from transformers import pipeline
 
@@ -56,6 +56,23 @@ class Transcriber:
         )
         self.language = language
         self.lock = asyncio.Lock()
+        # Vocabulario opcional: Whisper lo usa como "contexto previo" y reconoce
+        # mejor esos nombres. Máximo ~200 tokens (límite de Whisper).
+        self.prompt_text = ""
+        self.prompt_ids = None
+        if vocab:
+            try:
+                ids = self.pipe.tokenizer.get_prompt_ids(vocab, return_tensors="pt")
+                if len(ids) > 220:
+                    log.warning("Vocabulario demasiado largo (%d tokens): se recorta a 220", len(ids))
+                    ids = ids[:220]
+                self.prompt_ids = ids.to(self.pipe.device)
+                self.prompt_text = vocab.strip()
+                self._run(np.zeros(SAMPLE_RATE, dtype=np.float32))   # comprobar que funciona
+                log.info("Vocabulario activo (%d tokens)", len(ids))
+            except Exception as exc:  # noqa: BLE001
+                self.prompt_ids, self.prompt_text = None, ""
+                log.warning("No se pudo activar el vocabulario (%s): se sigue sin él", exc)
         # Calentamiento: la primera inferencia siempre es lenta
         self._run(np.zeros(SAMPLE_RATE, dtype=np.float32))
         t0 = time.monotonic()
@@ -63,17 +80,17 @@ class Transcriber:
         log.info("Modelo listo en %s. Un paso tarda ~%.2fs (ideal: menos de 1s).", device, time.monotonic() - t0)
 
     def _run(self, audio: np.ndarray) -> str:
-        out = self.pipe(
-            {"raw": audio, "sampling_rate": SAMPLE_RATE},
-            generate_kwargs={
-                "language": self.language,
-                "task": "transcribe",
-                "num_beams": 1,          # búsqueda simple: mucho más rápida
-                "do_sample": False,
-                "max_new_tokens": 160,   # una frase de pocos segundos no necesita más
-            },
-        )
-        return (out.get("text") or "").strip()
+        kwargs = {
+            "language": self.language,
+            "task": "transcribe",
+            "num_beams": 1,          # búsqueda simple: mucho más rápida
+            "do_sample": False,
+            "max_new_tokens": 160,   # una frase de pocos segundos no necesita más
+        }
+        if self.prompt_ids is not None:
+            kwargs["prompt_ids"] = self.prompt_ids
+        out = self.pipe({"raw": audio, "sampling_rate": SAMPLE_RATE}, generate_kwargs=kwargs)
+        return strip_prompt((out.get("text") or "").strip(), self.prompt_text)
 
     async def transcribe(self, audio: np.ndarray) -> str:
         async with self.lock:  # un solo modelo: una inferencia a la vez
@@ -92,6 +109,22 @@ HALLUCINATIONS = {
     "copyright wdr",
     "swr 2020",
 }
+
+
+def strip_prompt(text: str, prompt: str) -> str:
+    """Algunas versiones de transformers devuelven el vocabulario delante del texto: se quita."""
+    if prompt and text.startswith(prompt):
+        return text[len(prompt):].strip()
+    return text
+
+
+def echoes_prompt(text: str, prompt: str) -> bool:
+    """Con silencio, Whisper a veces "lee" el vocabulario en vez de escuchar: se descarta."""
+    if not prompt:
+        return False
+    words = [w.strip(".,;:!?").lower() for w in text.split()]
+    vocab = {w.strip(".,;:!?").lower() for w in prompt.split()}
+    return len(words) >= 3 and sum(w in vocab for w in words) / len(words) > 0.8
 
 
 def is_hallucination(text: str) -> bool:
@@ -259,7 +292,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
             took = time.monotonic() - t0
             seg.note_cost(took)
             log.debug("%s %.1fs audio en %.2fs: %s", kind, len(audio) / SAMPLE_RATE, took, text)
-            if is_hallucination(text):
+            if is_hallucination(text) or echoes_prompt(text, transcriber.prompt_text):
                 if kind == "final":
                     await send("partial", "")
                 continue
@@ -279,7 +312,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
         if audio is not None:
             try:
                 text = await transcriber.transcribe(audio)
-                if not is_hallucination(text):
+                if not is_hallucination(text) and not echoes_prompt(text, transcriber.prompt_text):
                     await send("final", text)
             except Exception:  # noqa: BLE001
                 log.exception("Error al transcribir lo pendiente")
@@ -328,6 +361,9 @@ def main() -> None:
                         help="Pausa (s) que cierra una frase")
     parser.add_argument("--max-seg", type=float, default=6.0,
                         help="Duración máxima (s) de un segmento si el predicador no hace pausas")
+    parser.add_argument("--vocab", nargs="?", const=str(Path(__file__).resolve().parent / "vocab" / "de.txt"),
+                        default="", metavar="ARCHIVO",
+                        help="Activar vocabulario bíblico para Whisper (por defecto vocab/de.txt)")
     parser.add_argument("--allow-origin", action="append", default=[],
                         help="Permitir otra web (p. ej. https://usuario.github.io). Repetible.")
     parser.add_argument("--verbose", action="store_true")
@@ -347,10 +383,19 @@ def main() -> None:
     app = web.Application()
     app["args"] = args
     app["web_dir"] = (Path(__file__).resolve().parent.parent / "web")
-    app["transcriber"] = Transcriber(args.model, args.device, args.language)
+    vocab = ""
+    if args.vocab:
+        vp = Path(args.vocab)
+        if vp.exists():
+            vocab = " ".join(vp.read_text(encoding="utf-8").split())
+        else:
+            log.warning("No existe el vocabulario %s: se sigue sin él", vp)
+    app["transcriber"] = Transcriber(args.model, args.device, args.language, vocab)
     app.router.add_get("/", index)
     app.router.add_get("/ws", ws_handler)
     app.router.add_static("/static", app["web_dir"], show_index=False)
+    if (app["web_dir"] / "glossary").is_dir():
+        app.router.add_static("/glossary", app["web_dir"] / "glossary", show_index=False)
 
     log.info("Abre http://%s:%d en Chrome", "localhost" if args.host == "127.0.0.1" else args.host, args.port)
     web.run_app(app, host=args.host, port=args.port, print=None)

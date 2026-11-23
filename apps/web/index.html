@@ -108,6 +108,10 @@
 <section id="settings">
   <div class="hint"><b>Glosario</b>: una sección por par de idiomas (<code>[de>es]</code>, <code>[fr>es]</code>…) y una línea por término, con el formato <code>original = traducción</code>.
     Se aplica antes de traducir para que los términos clave siempre salgan igual. Las líneas que empiezan por # se ignoran.</div>
+  <p>
+    <label><input type="checkbox" id="useBuiltin" checked> Usar el glosario bíblico incorporado (libros, nombres y términos de iglesia)</label>
+    <span class="hint" id="glossaryInfo"></span>
+  </p>
   <textarea id="glossary" spellcheck="false"></textarea>
   <p>
     <label><input type="checkbox" id="liveInterim" checked> Traducir mientras habla (más rápido; el texto gris puede cambiar)</label>
@@ -175,29 +179,15 @@
   const trCode = (code) => code.split("-")[0];
 
   const DEFAULT_GLOSSARY = [
+    "# Tus términos propios (mandan sobre el glosario bíblico incorporado).",
     "# Una sección por par de idiomas: [origen>destino]. Formato: original = traducción",
-    "# Las líneas antes de la primera sección se aplican a alemán → español.",
+    "# Ejemplos: nombres de vuestra iglesia, predicadores, lugares, ministerios…",
     "[de>es]",
-    "Heiliger Geist = Espíritu Santo",
-    "Heiligen Geist = Espíritu Santo",
-    "Heiligen Geistes = Espíritu Santo",
-    "Abendmahl = Santa Cena",
-    "Herr Jesus = Señor Jesús",
-    "Jesus Christus = Jesucristo",
-    "Gemeinde = iglesia",
-    "Gnade = gracia",
-    "Sünde = pecado",
-    "Sünden = pecados",
-    "Erlösung = redención",
-    "Evangelium = evangelio",
     "",
     "[fr>es]",
-    "Saint-Esprit = Espíritu Santo",
-    "Sainte Cène = Santa Cena",
     "",
     "[en>es]",
-    "Holy Spirit = Espíritu Santo",
-    "Lord's Supper = Santa Cena"
+    ""
   ].join("\n");
 
   // ---------- almacenamiento local (puede fallar en algunos contextos) ----------
@@ -215,6 +205,7 @@
     status: $("status"), statusText: $("statusText"), banner: $("banner"),
     source: $("source"), target: $("target"),
     streamUrl: $("streamUrl"), openStream: $("openStream"), closeStream: $("closeStream"),
+    useBuiltin: $("useBuiltin"), glossaryInfo: $("glossaryInfo"),
     readWpm: $("readWpm"), readWpmLabel: $("readWpmLabel"), autoCatch: $("autoCatch"),
     guideOn: $("guideOn"), guidePos: $("guidePos"), guide: $("guide"), guideHandle: $("guideHandle"),
     catchup: $("catchup"),
@@ -420,30 +411,60 @@
   }
 
   // ---------- glosario ----------
-  let glossaryRules = [];
-  // Solo se aplican las reglas del par de idiomas actual (p. ej. [de>es]); así un
-  // término en español nunca se cuela en una traducción al inglés o al francés.
+  // Glosario = glosario bíblico incorporado (archivo por par de idiomas) + el del usuario.
+  // Si un término está en los dos, manda el del usuario.
+  // Se aplica con UNA sola expresión regular (rápido aunque haya miles de términos).
+  let glossaryRe = null;
+  let glossaryMap = new Map();
+  const builtinCache = new Map();     // "de>es" -> Map | null (no existe) | "loading"
+
+  function loadBuiltinGlossary(pair) {
+    if (builtinCache.has(pair)) return;
+    builtinCache.set(pair, "loading");
+    const [a, b] = pair.split(">");
+    fetch(`glossary/${a}-${b}.json`, { cache: "no-cache" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        const m = new Map();
+        if (data && data.entries) for (const [k, v] of Object.entries(data.entries)) m.set(k, v);
+        builtinCache.set(pair, m);
+      })
+      .catch(() => builtinCache.set(pair, null))   // abierta con doble clic: sin glosario incorporado
+      .finally(parseGlossary);
+  }
+
   function parseGlossary() {
     const pair = trCode(el.src.value) + ">" + trCode(el.tgt.value);
+    const entries = new Map();
+    if (el.useBuiltin.checked) {
+      const builtin = builtinCache.get(pair);
+      if (builtin === undefined) loadBuiltinGlossary(pair);
+      else if (builtin instanceof Map) for (const [k, v] of builtin) entries.set(k.toLowerCase().replace(/\s+/g, " "), [k, v]);
+    }
+    const builtinCount = entries.size;
     let section = "de>es";
-    const pairs = [];
+    let userCount = 0;
     for (const raw of el.glossary.value.split("\n")) {
       const line = raw.trim();
       const head = line.match(/^\[\s*([a-z]{2})\s*>\s*([a-z]{2})\s*\]$/i);
       if (head) { section = (head[1] + ">" + head[2]).toLowerCase(); continue; }
       if (!line || line.startsWith("#") || !line.includes("=") || section !== pair) continue;
       const idx = line.indexOf("=");
-      pairs.push([line.slice(0, idx).trim(), line.slice(idx + 1).trim()]);
+      const k = line.slice(0, idx).trim(), v = line.slice(idx + 1).trim();
+      if (k && v) { entries.set(k.toLowerCase().replace(/\s+/g, " "), [k, v]); userCount++; }
     }
-    glossaryRules = pairs
-      .filter(([a, b]) => a && b)
-      .sort((x, y) => y[0].length - x[0].length)
-      .map(([a, b]) => {
-        const escaped = a.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        return [new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, "giu"), b];
-      });
+    glossaryMap = new Map([...entries].map(([lk, [, v]]) => [lk, v]));
+    const keys = [...entries.values()].map(([k]) => k).sort((x, y) => y.length - x.length)
+      .map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+"));
+    glossaryRe = keys.length
+      ? new RegExp(`(?<![\\p{L}\\p{N}])(?:${keys.join("|")})(?![\\p{L}\\p{N}])`, "giu")
+      : null;
+    el.glossaryInfo.textContent = (builtinCount ? `Glosario bíblico: ${builtinCount} términos · ` : "") +
+      `tuyos: ${userCount} (${pair})`;
   }
-  const applyGlossary = (text) => glossaryRules.reduce((t, [re, rep]) => t.replace(re, rep), text);
+  const applyGlossary = (text) => (glossaryRe
+    ? text.replace(glossaryRe, (m) => glossaryMap.get(m.toLowerCase().replace(/\s+/g, " ")) ?? m)
+    : text);
 
   // ---------- traductor en el dispositivo (Chrome Translator API) ----------
   async function ensureTranslator() {
@@ -828,6 +849,8 @@
   });
   el.openSettings.addEventListener("click", () => el.settings.classList.toggle("open"));
   el.glossary.addEventListener("input", () => { store.set("glossary", el.glossary.value); parseGlossary(); });
+  el.useBuiltin.checked = store.get("useBuiltin", "1") === "1";
+  el.useBuiltin.addEventListener("change", () => { store.set("useBuiltin", el.useBuiltin.checked ? "1" : "0"); parseGlossary(); });
   el.liveInterim.addEventListener("change", () => store.set("liveInterim", el.liveInterim.checked ? "1" : "0"));
   el.interimMs.addEventListener("change", () => store.set("interimMs", el.interimMs.value));
   el.exportBtn.addEventListener("click", () => {

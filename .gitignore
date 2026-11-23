@@ -74,3 +74,6 @@ Thumbs.db
 .idea/
 *.swp
 *.orig
+
+# --- Biblias descargadas (se regeneran con tools/fetch_bibles.py) ---
+/data/bibles/

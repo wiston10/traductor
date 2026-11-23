@@ -37,6 +37,7 @@ En la barra elige **Voz: Whisper suizo-alemán** y pulsa **Empezar**.
 | `--max-seg 5` | 6 | Corta antes cuando el predicador no hace pausas |
 | `--silence 0.4` | 0.5 | Pausa más corta para cerrar frase |
 | `--model …` | `Flurin17/whisper-large-v3-turbo-swiss-german` | Probar otro modelo, p. ej. `nizarmichaud/whisper-large-v3-turbo-swissgerman` |
+| `--vocab` | apagado | Da a Whisper una lista de nombres bíblicos y términos de iglesia (`vocab/de.txt`) para reconocerlos mejor. Pruébalo y compara |
 | `--verbose` | — | Muestra cuánto tarda cada paso |
 | `--allow-origin URL` | — | Permitir que otra web (p. ej. la página publicada en GitHub Pages) use el servidor |
 
