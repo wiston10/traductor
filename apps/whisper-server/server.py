@@ -25,6 +25,8 @@ from pathlib import Path
 import numpy as np
 from aiohttp import WSMsgType, web
 
+import training_store as store
+
 SAMPLE_RATE = 16000
 FRAME = 480  # 30 ms
 
@@ -264,6 +266,20 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
 
     seg = Segmenter(args.partial_every, args.silence, args.max_seg)
     closed = asyncio.Event()
+    recorder: store.Recorder | None = None     # solo si la página activa «Guardar para entrenamiento»
+
+    async def keep(audio: np.ndarray, text: str) -> None:
+        """Guarda la frase (audio + texto) si está activado el modo entrenamiento."""
+        if recorder is None:
+            return
+        try:
+            await asyncio.to_thread(recorder.save, audio, text)
+            if not ws.closed:
+                await ws.send_str(json.dumps({"type": "saved", "count": recorder.count,
+                                              "minutes": round(recorder.seconds / 60, 1),
+                                              "session": recorder.dir.name if recorder.dir else ""}))
+        except Exception:  # noqa: BLE001
+            log.exception("No se pudo guardar la frase para entrenamiento")
 
     async def send(kind: str, text: str, level: str | None = None) -> None:
         if not ws.closed:
@@ -298,6 +314,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                 continue
             if kind == "final":
                 await send("final", text)
+                await keep(audio, text)
             elif text != seg.last_partial_text:
                 seg.last_partial_text = text
                 await send("partial", text)
@@ -314,6 +331,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                 text = await transcriber.transcribe(audio)
                 if not is_hallucination(text) and not echoes_prompt(text, transcriber.prompt_text):
                     await send("final", text)
+                    await keep(audio, text)
             except Exception:  # noqa: BLE001
                 log.exception("Error al transcribir lo pendiente")
         await send("flushed", "")
@@ -328,7 +346,13 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                     data = json.loads(msg.data)
                 except ValueError:
                     continue
-                if data.get("type") == "flush":
+                if data.get("type") == "config":
+                    if data.get("save") and recorder is None:
+                        recorder = store.Recorder(app["data_dir"])
+                        log.info("Guardando frases para entrenamiento en %s", app["data_dir"])
+                    elif not data.get("save"):
+                        recorder = None
+                elif data.get("type") == "flush":
                     closed.set()          # el trabajador deja de cortar mientras vaciamos
                     await flush()
             elif msg.type == WSMsgType.ERROR:
@@ -338,6 +362,68 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
         task.cancel()
         log.info("Cliente desconectado")
     return ws
+
+
+def _check_origin(request: web.Request) -> None:
+    if not origin_allowed(request.headers.get("Origin"), request.app["args"].allow_origin):
+        raise web.HTTPForbidden(text="Origen no permitido")
+
+
+def _api_errors(fn):
+    async def wrapper(request: web.Request):
+        try:
+            return await fn(request)
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc))
+        except FileNotFoundError:
+            raise web.HTTPNotFound(text="No existe")
+    return wrapper
+
+
+@_api_errors
+async def api_sessions(request: web.Request) -> web.Response:
+    _check_origin(request)
+    return web.json_response(await asyncio.to_thread(store.list_sessions, request.app["data_dir"]))
+
+
+@_api_errors
+async def api_session(request: web.Request) -> web.Response:
+    _check_origin(request)
+    return web.json_response(await asyncio.to_thread(
+        store.get_session, request.app["data_dir"], request.match_info["sid"]))
+
+
+@_api_errors
+async def api_update_segment(request: web.Request) -> web.Response:
+    _check_origin(request)
+    body = await request.json()
+    rec = await asyncio.to_thread(store.update_segment, request.app["data_dir"], request.match_info["sid"],
+                                  request.match_info["seg"], body.get("text"), body.get("status", ""))
+    return web.json_response(rec)
+
+
+@_api_errors
+async def api_session_meta(request: web.Request) -> web.Response:
+    _check_origin(request)
+    body = await request.json()
+    meta = await asyncio.to_thread(store.set_session_meta, request.app["data_dir"], request.match_info["sid"],
+                                   body.get("purpose"), body.get("note"))
+    return web.json_response(meta)
+
+
+@_api_errors
+async def api_audio(request: web.Request) -> web.StreamResponse:
+    sid, seg = request.match_info["sid"], request.match_info["seg"]
+    if not store.SESSION_RE.match(sid) or not store.SEGMENT_RE.match(seg):
+        raise ValueError("ruta no válida")
+    path = request.app["data_dir"] / sid / f"{seg}.wav"
+    if not path.exists():
+        raise FileNotFoundError(seg)
+    return web.FileResponse(path, headers={"Cache-Control": "no-store"})
+
+
+async def corregir(request: web.Request) -> web.StreamResponse:
+    return web.FileResponse(request.app["web_dir"] / "corregir.html")
 
 
 async def index(request: web.Request) -> web.StreamResponse:
@@ -364,6 +450,8 @@ def main() -> None:
     parser.add_argument("--vocab", nargs="?", const=str(Path(__file__).resolve().parent / "vocab" / "de.txt"),
                         default="", metavar="ARCHIVO",
                         help="Activar vocabulario bíblico para Whisper (por defecto vocab/de.txt)")
+    parser.add_argument("--data-dir", default=str(Path(__file__).resolve().parent / "training-data"),
+                        help="Carpeta donde se guardan las frases para entrenamiento")
     parser.add_argument("--allow-origin", action="append", default=[],
                         help="Permitir otra web (p. ej. https://usuario.github.io). Repetible.")
     parser.add_argument("--verbose", action="store_true")
@@ -393,6 +481,13 @@ def main() -> None:
     app["transcriber"] = Transcriber(args.model, args.device, args.language, vocab)
     app.router.add_get("/", index)
     app.router.add_get("/ws", ws_handler)
+    app["data_dir"] = Path(args.data_dir)
+    app.router.add_get("/corregir", corregir)
+    app.router.add_get("/api/sessions", api_sessions)
+    app.router.add_get("/api/sessions/{sid}", api_session)
+    app.router.add_post("/api/sessions/{sid}", api_session_meta)
+    app.router.add_post("/api/sessions/{sid}/segments/{seg}", api_update_segment)
+    app.router.add_get("/api/audio/{sid}/{seg}", api_audio)
     app.router.add_static("/static", app["web_dir"], show_index=False)
     if (app["web_dir"] / "glossary").is_dir():
         app.router.add_static("/glossary", app["web_dir"] / "glossary", show_index=False)

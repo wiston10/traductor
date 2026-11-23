@@ -76,6 +76,30 @@ def test_vocabulario():
     assert not s.echoes_prompt("Johannes und Petrus", "")
 
 
+def test_almacen_entrenamiento():
+    import tempfile
+    from pathlib import Path
+    import training_store as ts
+    root = Path(tempfile.mkdtemp()) / "training-data"
+    rec = ts.Recorder(root)
+    rec.save(voice(2), "Heute lesen wir Johannes.")
+    rec.save(voice(1), "Musik")
+    sid = rec.dir.name
+    ts.update_segment(root, sid, "000001", "Heute lesen wir im Johannesevangelium.", "corrected")
+    ts.update_segment(root, sid, "000002", None, "discarded")
+    info = ts.get_session(root, sid)
+    assert info["done"] == 1 and info["discarded"] == 1 and info["pending"] == 0
+    assert info["items"][0]["auto_text"] == "Heute lesen wir Johannes."     # se conserva el original
+    for bad_sid, bad_seg in (("../etc", "000001"), (sid, "../x")):
+        try:
+            ts.update_segment(root, bad_sid, bad_seg, "x", "ok")
+            raise AssertionError("debería rechazar rutas peligrosas")
+        except (ValueError, FileNotFoundError):
+            pass
+    assert ts.word_errors("Heute lesen wir im Evangelium.", "heute lesen wir in evangelium") == (1, 5)
+    assert ts.word_errors("Er heißt Paulus", "er heisst paulus") == (0, 3)
+
+
 if __name__ == "__main__":
     tests = [v for k, v in dict(globals()).items() if k.startswith("test_")]
     for t in tests:

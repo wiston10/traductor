@@ -54,3 +54,23 @@ python3 test_server.py
 ```
 Comprueban los cortes de frase, el descarte de ruidos cortos, la voz con volumen bajo
 y el filtro de seguridad, sin cargar el modelo.
+
+## Guardar frases para entrenar (fase 2)
+
+1. En el apuntador, con el motor **Whisper**, activa **💾 Guardar para entrenamiento**
+   (siempre con permiso de quien predica; se desactiva solo al recargar la página).
+   Cada frase se guarda en `training-data/<fecha_hora>/` (audio WAV + texto). No va a git.
+2. Abre **http://localhost:8765/corregir**: escucha cada frase, corrige el texto en
+   **alemán estándar** y pulsa **Enter** (guarda y pasa a la siguiente).
+   `Alt+R` repite el audio, `Alt+D` descarta (música, ruido, no se entiende).
+   Marca 1 de cada 5 cultos como **Prueba**: esos sirven para medir y nunca se entrenan.
+3. Mide el acierto real (no carga el modelo):
+   ```bash
+   .venv/bin/python evaluate.py                 # % de error en directo y palabras que más falla
+   .venv/bin/python evaluate.py --model <otro>  # comparar otro modelo con las sesiones de prueba
+   .venv/bin/python evaluate.py --model Flurin17/whisper-large-v3-turbo-swiss-german --vocab  # ¿ayuda --vocab?
+   ```
+4. Cuando haya 10–20 h corregidas, exporta el conjunto para entrenar:
+   ```bash
+   python3 ../../tools/export_dataset.py        # -> data/dataset/train y data/dataset/test
+   ```

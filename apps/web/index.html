@@ -73,6 +73,8 @@
     background: var(--panel); border-bottom: 1px solid var(--line); font-size: 14px; }
   #linkbar input[type=url] { flex: 1; min-width: 240px; font: inherit; background: #11141a; color: var(--text);
     border: 1px solid #333847; border-radius: 8px; padding: 6px 10px; }
+  #linkbar a { color: var(--accent); text-decoration: none; }
+  #saveWrap.disabled { opacity: .45; }
   #linkbar select, #linkbar button { font: inherit; background: #222632; color: var(--text);
     border: 1px solid #333847; border-radius: 8px; padding: 6px 10px; }
   #layout { flex: 1; display: flex; min-height: 0; }
@@ -131,6 +133,9 @@
     <option value="chrome">Chrome (alemán estándar, nube de Google)</option>
     <option value="whisper">Whisper suizo-alemán (este ordenador)</option>
   </select>
+  <label id="saveWrap" title="Guarda en este Mac el audio y el texto de cada frase para corregirlos y entrenar el modelo (solo motor Whisper)">
+    <input type="checkbox" id="saveTraining"> 💾 Guardar para entrenamiento <b id="savedInfo"></b></label>
+  <a href="/corregir" target="_blank" id="corregirLink" title="Abrir la herramienta para corregir transcripciones">Corregir ↗</a>
   <label for="audioSource">Audio:</label>
   <select id="audioSource">
     <option value="tab">De la transmisión (esta pestaña)</option>
@@ -205,6 +210,7 @@
     status: $("status"), statusText: $("statusText"), banner: $("banner"),
     source: $("source"), target: $("target"),
     streamUrl: $("streamUrl"), openStream: $("openStream"), closeStream: $("closeStream"),
+    saveTraining: $("saveTraining"), saveWrap: $("saveWrap"), savedInfo: $("savedInfo"),
     useBuiltin: $("useBuiltin"), glossaryInfo: $("glossaryInfo"),
     readWpm: $("readWpm"), readWpmLabel: $("readWpmLabel"), autoCatch: $("autoCatch"),
     guideOn: $("guideOn"), guidePos: $("guidePos"), guide: $("guide"), guideHandle: $("guideHandle"),
@@ -600,8 +606,13 @@
       throw new Error(`No se puede conectar con el servidor Whisper (${url}): ${err.message}. ¿Está arrancado?`);
     });
     state.ws = ws;
+    sendTrainingConfig();
     ws.onmessage = (e) => {
       let m; try { m = JSON.parse(e.data); } catch { return; }
+      if (m.type === "saved") {
+        el.savedInfo.textContent = `(${m.count} frases · ${m.minutes} min)`;
+        return;
+      }
       if (m.type === "partial") {
         state.interimSrc = (m.text || "").trim();
         if (!state.interimSrc) state.interimTgt = "";
@@ -644,6 +655,20 @@
     state.audioCtx = ctx;
     setStatus("live", "Escuchando (Whisper local)");
   }
+  function sendTrainingConfig() {
+    const ws = state.ws;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "config", save: el.saveTraining.checked && el.engine.value === "whisper" }));
+    }
+  }
+  function updateSaveAvailability() {
+    const whisper = el.engine.value === "whisper";
+    el.saveTraining.disabled = !whisper;
+    el.saveWrap.classList.toggle("disabled", !whisper);
+    // La herramienta de corrección solo existe si la página la sirve el servidor Whisper
+    $("corregirLink").style.display = location.protocol.startsWith("http") ? "" : "none";
+  }
+
   function stopWhisper() {
     const ws = state.ws; state.ws = null;
     if (ws) {
@@ -966,7 +991,20 @@
     } else if (e.key === "End") { el.catchup.click(); e.preventDefault(); }
   });
 
+  // Guardar para entrenamiento: nunca se deja activado de una sesión a otra (privacidad)
+  updateSaveAvailability();
+  el.saveTraining.addEventListener("change", () => {
+    if (el.saveTraining.checked) {
+      showBanner("Se guardará en este Mac el audio y el texto de cada frase, para corregirlos y entrenar el modelo. " +
+        "Hazlo solo con el permiso de quien predica. Desactívalo cuando no lo necesites.");
+    } else {
+      showBanner("");
+    }
+    sendTrainingConfig();
+  });
+
   el.engine.addEventListener("change", () => {
+    updateSaveAvailability();
     store.set("engine", el.engine.value);
     if (el.engine.value === "whisper" && !el.src.value.startsWith("de")) {
       el.src.value = "de-CH";

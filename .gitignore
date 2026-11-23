@@ -77,3 +77,4 @@ Thumbs.db
 
 # --- Biblias descargadas (se regeneran con tools/fetch_bibles.py) ---
 /data/bibles/
+/data/dataset/
