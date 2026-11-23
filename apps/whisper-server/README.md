@@ -74,3 +74,35 @@ y el filtro de seguridad, sin cargar el modelo.
    ```bash
    python3 ../../tools/export_dataset.py        # -> data/dataset/train y data/dataset/test
    ```
+
+## Modo idea (fase 3, experimental)
+
+Un modelo de lenguaje **local** resume en una frase corta la idea de lo que se está diciendo,
+teniendo en cuenta las frases anteriores. No sustituye a la traducción literal: va al lado.
+
+1. Instala **Ollama** (gratis): https://ollama.com — y descarga un modelo pequeño (~3 GB):
+   ```bash
+   ollama pull gemma3:4b
+   ```
+   Importante: usa un modelo **sin razonamiento**. `qwen3:4b` «piensa en voz alta» en inglés
+   antes de responder (probado: ~7 s por idea y sin respuesta útil); no sirve en directo.
+2. Arranca el servidor como siempre. En el apuntador, **Ver:** «Traducción + 💡 idea» o «Solo 💡 ideas».
+3. Mide en tu Mac cuánto tarda y qué escribe:
+   ```bash
+   .venv/bin/python bench_idea.py                     # con gemma3:4b
+   .venv/bin/python bench_idea.py --model llama3.2:3b # comparar con otro sin razonamiento
+   ```
+   Por defecto compara dos formas: el modelo recibe **solo la traducción literal** (la opción por
+   defecto del servidor) u **original + traducción literal** (`--idea-input ambos`).
+   Resultado con gemma3:4b en un MacBook Air M3 (23.11.2026): «solo literal» acertó 7 de 8 sin
+   inventar nada; «original + literal» 5 de 8 y se adelantó a una conclusión. Unos 4–5 s por idea;
+   con el Mac caliente y Whisper a la vez, cuenta con más.
+   Para usar otro modelo en directo: `python3 server.py --idea-model llama3.2:3b`.
+
+Cosas a saber:
+- Funciona con los dos motores de voz (Chrome y Whisper) y con alemán, francés e inglés.
+- Es **más lento** que la traducción literal (en un M3 de 16 GB, del orden de 1–3 s por idea; mídelo).
+  Si llegan frases mientras piensa, las agrupa en la siguiente idea: nunca se forma cola.
+- En un Mac de 16 GB compite con Whisper por la memoria y la gráfica. Si aparece «Whisper va lento»,
+  vuelve a la vista «Traducción».
+- Puede equivocarse o simplificar de más: es una ayuda, no una fuente. Pruébalo antes de usarlo un domingo.

@@ -26,6 +26,7 @@ import numpy as np
 from aiohttp import WSMsgType, web
 
 import training_store as store
+from idea import IdeaClient
 
 SAMPLE_RATE = 16000
 FRAME = 480  # 30 ms
@@ -422,6 +423,41 @@ async def api_audio(request: web.Request) -> web.StreamResponse:
     return web.FileResponse(path, headers={"Cache-Control": "no-store"})
 
 
+def _cors(request: web.Request, resp: web.StreamResponse) -> web.StreamResponse:
+    """Permite usar el modo idea desde la página abierta en otro puerto local."""
+    origin = request.headers.get("Origin")
+    if origin and origin_allowed(origin, request.app["args"].allow_origin):
+        resp.headers["Access-Control-Allow-Origin"] = origin
+    return resp
+
+
+async def api_idea_status(request: web.Request) -> web.Response:
+    _check_origin(request)
+    return _cors(request, web.json_response(await request.app["idea"].status()))
+
+
+async def api_idea(request: web.Request) -> web.Response:
+    _check_origin(request)
+    try:
+        # La página lo envía como text/plain para evitar la consulta previa CORS
+        body = json.loads(await request.text())
+        latest = str(body.get("text", ""))[:2000]
+        context = [str(c)[:1000] for c in body.get("context", [])][-4:]
+        src, tgt = str(body.get("src", "de"))[:5], str(body.get("tgt", "es"))[:5]
+        literal = str(body.get("literal", ""))[:2000]
+        context_literal = [str(c)[:1000] for c in body.get("context_literal", [])][-4:]
+    except (ValueError, AttributeError, TypeError):
+        raise web.HTTPBadRequest(text="Petición no válida")
+    if not latest.strip():
+        return _cors(request, web.json_response({"idea": "", "ms": 0}))
+    try:
+        result = await request.app["idea"].idea(context, latest, src, tgt, literal, context_literal)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Modo idea: %s", exc)
+        return _cors(request, web.json_response({"error": str(exc)[:200]}, status=503))
+    return _cors(request, web.json_response(result))
+
+
 async def corregir(request: web.Request) -> web.StreamResponse:
     return web.FileResponse(request.app["web_dir"] / "corregir.html")
 
@@ -452,6 +488,11 @@ def main() -> None:
                         help="Activar vocabulario bíblico para Whisper (por defecto vocab/de.txt)")
     parser.add_argument("--data-dir", default=str(Path(__file__).resolve().parent / "training-data"),
                         help="Carpeta donde se guardan las frases para entrenamiento")
+    parser.add_argument("--idea-model", default="gemma3:4b",
+                        help="Modelo de Ollama SIN razonamiento para el modo idea (por defecto gemma3:4b)")
+    parser.add_argument("--idea-input", choices=("ambos", "literal"), default="literal",
+                        help="Qué recibe el modelo: solo la traducción literal (por defecto: más fiel en las "
+                             "pruebas con gemma3:4b) u original + traducción literal")
     parser.add_argument("--allow-origin", action="append", default=[],
                         help="Permitir otra web (p. ej. https://usuario.github.io). Repetible.")
     parser.add_argument("--verbose", action="store_true")
@@ -483,6 +524,13 @@ def main() -> None:
     app.router.add_get("/ws", ws_handler)
     app["data_dir"] = Path(args.data_dir)
     app.router.add_get("/corregir", corregir)
+    app["idea"] = IdeaClient(args.idea_model, input_mode=args.idea_input)
+    app.router.add_get("/api/idea/status", api_idea_status)
+    app.router.add_post("/api/idea", api_idea)
+
+    async def _close_idea(app_: web.Application) -> None:
+        await app_["idea"].close()
+    app.on_cleanup.append(_close_idea)
     app.router.add_get("/api/sessions", api_sessions)
     app.router.add_get("/api/sessions/{sid}", api_session)
     app.router.add_post("/api/sessions/{sid}", api_session_meta)

@@ -100,6 +100,27 @@ def test_almacen_entrenamiento():
     assert ts.word_errors("Er heißt Paulus", "er heisst paulus") == (0, 3)
 
 
+def test_modo_idea():
+    import idea
+    m = idea.build_messages(["a", "b", "c", "d", "e"], "Gott liebt die Welt.", "de", "es", input_mode="ambos")
+    assert "alemán" in m[0]["content"] and "español" in m[0]["content"]
+    assert m[-1]["content"].count("\n- ") == 4                      # solo 4 frases de contexto
+    assert len(m) == 10                                               # sistema + 4 ejemplos + pregunta
+    lit = idea.build_messages(["Gott liebt uns."], "Darum gab er seinen Sohn.", "de", "es",
+                              "Por eso dio a su Hijo.", input_mode="literal", context_literal=["Dios nos ama."])
+    assert all("Darum" not in x["content"] and "Wir lesen" not in x["content"] for x in lit)   # sin alemán
+    assert "- Dios nos ama." in lit[-1]["content"]
+    m2 = idea.build_messages([], "x", "de", "es", literal="Por eso dio a su Hijo.", input_mode="ambos")
+    assert "Traducción literal:\nPor eso dio a su Hijo." in m2[-1]["content"]
+    assert idea.clean_output("...") == "" and idea.clean_output("…") == ""
+    assert idea.clean_output("<think>x</think>\nDios ama al mundo.") == "Dios ama al mundo."
+    assert idea.clean_output("**Frase: Oremos juntos.**") == "Oremos juntos."
+    assert idea.clean_output("Idea principal: «La gracia nos salva.»\nPorque…") == "La gracia nos salva."
+    # Modelos que "razonan en voz alta" (caso real con qwen3:4b): nunca se muestran como idea
+    assert idea.clean_output("Okay, let's tackle this translation request. So, the user wants") == ""
+    assert idea.clean_output("The user wants...\n</think>\n\nDios ama al mundo.") == "Dios ama al mundo."
+
+
 if __name__ == "__main__":
     tests = [v for k, v in dict(globals()).items() if k.startswith("test_")]
     for t in tests:
