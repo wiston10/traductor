@@ -383,8 +383,13 @@ def build_parser() -> argparse.ArgumentParser:
                              "hacer que Whisper invente listas de palabras. Medir con evaluate.py --vocab")
     parser.add_argument("--translate", choices=("auto", "ct2", "transformers", "off", "fake"), default="auto",
                         help="Traducción NLLB en el servidor. auto = si está instalada (bash tools/setup_nllb.sh)")
-    parser.add_argument("--mt-beams", type=int, default=2, help="Búsqueda de la traducción (1 = más rápida)")
+    parser.add_argument("--mt-beams", type=int, default=1,
+                        help="Búsqueda de la traducción. 1 = medido en un M3: 14 idiomas en 1,9 s por frase "
+                             "(con 2: 3,1 s)")
     parser.add_argument("--mt-threads", type=int, default=4, help="Núcleos del procesador para traducir")
+    parser.add_argument("--mt-device", choices=("cpu", "mps"), default="cpu",
+                        help="Dónde traduce NLLB: cpu (deja la tarjeta gráfica a Whisper) o mps "
+                             "(tarjeta gráfica, experimental; compite con Whisper). Elegir con bench_mt.py --comparar")
     parser.add_argument("--data-dir", default=str(HERE / "training-data"),
                         help="Carpeta donde se guardan las frases para entrenamiento")
     parser.add_argument("--idea-model", default="gemma3:4b",
@@ -418,7 +423,8 @@ def build_app(args: argparse.Namespace, transcriber=None, translator: Translatio
                                        args.audio_ctx, args.beam, args.context)
     app["transcriber"] = transcriber
     if translator is None:
-        backend = load_backend(args.translate, beams=args.mt_beams, threads=args.mt_threads)
+        backend = load_backend(args.translate, beams=args.mt_beams, threads=args.mt_threads,
+                               device=args.mt_device)
         translator = TranslationService(backend) if backend else None
     app["translator"] = translator
     app["dialect"] = Dialect.load()

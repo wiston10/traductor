@@ -32,7 +32,8 @@ def test_frases_fijas():
     assert f.lookup("Amen.", "es") == "Amén."
     assert f.lookup("amen", "pt") == "Amém"
     assert f.lookup("Halleluja!", "en") == "Hallelujah!"
-    assert f.lookup("Amen.", "zh") is None                # sin forma revisada: se traduce normal
+    assert f.lookup("Amen.", "zh") == "阿们."
+    assert f.lookup("Amen.", "hi") == "Amen."              # sin forma revisada: la palabra tal cual, sin traducir
     assert f.lookup("Amen, so sei es.", "es") is None     # solo si la frase entera es la fórmula
 
 
@@ -45,8 +46,8 @@ def test_servicio_con_motor_simulado():
     assert out["en"] == "[en] Wir feiern das Abendmahl."
     # en y zh comparten texto de entrada: UNA llamada para los dos (lote)
     assert len(fake.calls) == 2 and sorted(fake.calls[1][2]) == ["en", "zh"]
-    amen = svc.translate_sync("Amen.", "de", ["es", "zh"])
-    assert amen["es"] == "Amén." and amen["zh"] == "[zh] Amen."
+    amen = svc.translate_sync("Amen.", "de", ["es", "zh", "hi"])
+    assert amen == {"es": "Amén.", "zh": "阿们.", "hi": "Amen."}       # nunca pasa por el traductor
     assert svc.translate_sync("", "de", ["es"]) == {}
     assert svc.translate_sync("Hallo", "de", []) == {}
 

@@ -1,13 +1,46 @@
 {
-  "note": "Frases litúrgicas que no pasan por el traductor si la frase ENTERA es una de ellas. Solo se ponen formas revisadas; un idioma sin forma se traduce normalmente. Para añadir un idioma, que lo revise un hablante nativo.",
+  "note": "Frases litúrgicas que no pasan por el traductor si la frase ENTERA es una de ellas. Si un idioma no tiene forma revisada, la palabra se deja tal cual (NLLB traducía «Amen.» al chino como «estar dispuesto»). Para añadir un idioma, que lo revise un hablante nativo.",
   "phrases": {
     "amen": {
-      "match": ["amen", "amén", "amém", "аминь"],
-      "forms": {"de": "Amen", "en": "Amen", "es": "Amén", "fr": "Amen", "pt": "Amém", "it": "Amen", "ru": "Аминь"}
+      "match": [
+        "amen",
+        "amén",
+        "amém",
+        "аминь",
+        "阿们"
+      ],
+      "forms": {
+        "de": "Amen",
+        "en": "Amen",
+        "es": "Amén",
+        "fr": "Amen",
+        "pt": "Amém",
+        "it": "Amen",
+        "ru": "Аминь",
+        "zh": "阿们"
+      }
     },
     "halleluja": {
-      "match": ["halleluja", "hallelujah", "alleluia", "aleluya", "aleluia", "alléluia", "аллилуйя"],
-      "forms": {"de": "Halleluja", "en": "Hallelujah", "es": "Aleluya", "fr": "Alléluia", "pt": "Aleluia", "it": "Alleluia", "ru": "Аллилуйя"}
+      "match": [
+        "halleluja",
+        "hallelujah",
+        "alleluia",
+        "aleluya",
+        "aleluia",
+        "alléluia",
+        "аллилуйя",
+        "哈利路亚"
+      ],
+      "forms": {
+        "de": "Halleluja",
+        "en": "Hallelujah",
+        "es": "Aleluya",
+        "fr": "Alléluia",
+        "pt": "Aleluia",
+        "it": "Alleluia",
+        "ru": "Аллилуйя",
+        "zh": "哈利路亚"
+      }
     }
   }
 }

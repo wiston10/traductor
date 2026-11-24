@@ -119,8 +119,9 @@ class Glossary:
 class FixedPhrases:
     """
     Frases litúrgicas que no deben pasar por el traductor («Amen.», «Halleluja!»).
-    Solo se usan si la frase ENTERA es una de ellas. Los idiomas sin forma revisada
-    se traducen normalmente (mejor eso que inventar una grafía).
+    Solo se usan si la frase ENTERA es una de ellas. En un idioma sin forma revisada se deja
+    la palabra tal cual: medido el 24.11.2026, NLLB tradujo «Amen.» al chino como «estar
+    dispuesto»; un «Amen» sin traducir se entiende, una traducción inventada no.
     """
 
     def __init__(self, path: Path = FIXED_FILE):
@@ -143,7 +144,7 @@ class FixedPhrases:
             return None
         form = self.phrases.get(key, {}).get(short_code(tgt))
         if not form:
-            return None
+            return text.strip()                    # sin forma revisada: la palabra original
         end = text.strip()[-1:] if text.strip()[-1:] in ".!?" else ""
         return form + end
 
@@ -162,11 +163,16 @@ class Ct2Backend(_Backend):
     """CTranslate2 + modelo convertido a int8: el más rápido en procesador."""
     name = "nllb-ct2"
 
-    def __init__(self, model_dir: Path, beams: int = 2, threads: int = 4):
+    def __init__(self, model_dir: Path, beams: int = 2, threads: int = 4, device: str = "cpu"):
         import ctranslate2
         from transformers import AutoTokenizer
-        self.translator = ctranslate2.Translator(str(model_dir), device="cpu", compute_type="int8",
+        ctranslate2.set_log_level(logging.ERROR)          # sin consejos en la consola
+        # cpu: int8 (el más ligero). mps (tarjeta gráfica de Apple, experimental en CTranslate2):
+        # el tipo lo elige CTranslate2. Ojo: en mps compite con Whisper por la tarjeta gráfica.
+        self.translator = ctranslate2.Translator(str(model_dir), device=device,
+                                                 compute_type="int8" if device == "cpu" else "auto",
                                                  inter_threads=1, intra_threads=threads)
+        self.name = f"nllb-ct2-{device}"
         self.tok = AutoTokenizer.from_pretrained(HF_MODEL)
         self.beams = beams
 
@@ -226,7 +232,8 @@ class FakeBackend(_Backend):
         return {t: f"[{t}] {text}" for t in targets}
 
 
-def load_backend(kind: str = "auto", model_dir: Path = CT2_DIR, beams: int = 2, threads: int = 4) -> _Backend | None:
+def load_backend(kind: str = "auto", model_dir: Path = CT2_DIR, beams: int = 2, threads: int = 4,
+                 device: str = "cpu") -> _Backend | None:
     """auto: CTranslate2 si está instalado y convertido; si no, ninguno (se avisa cómo activarlo)."""
     if kind == "off":
         return None
@@ -236,7 +243,7 @@ def load_backend(kind: str = "auto", model_dir: Path = CT2_DIR, beams: int = 2, 
         try:
             import ctranslate2  # noqa: F401
             if (model_dir / "model.bin").exists():
-                return Ct2Backend(model_dir, beams, threads)
+                return Ct2Backend(model_dir, beams, threads, device)
             msg = f"no está convertido el modelo NLLB en {model_dir}"
         except ImportError:
             msg = "falta ctranslate2"

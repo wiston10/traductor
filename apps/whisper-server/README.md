@@ -86,8 +86,22 @@ maratí y vietnamita. Corre en el procesador, así la tarjeta gráfica queda par
 ```bash
 npm run setup:nllb   # una vez: instala CTranslate2 y convierte el modelo (~600 MB)
 npm run bench:mt     # ¿cuánto tarda en traducir a 1, 3, 5 y 15 idiomas? Objetivo: < 2 s con 15
+npm run bench:mt -- --comparar   # prueba procesador/tarjeta gráfica, beams y núcleos
 npm start            # ya traduce solo
 ```
+
+Medido el 24.11.2026 en un MacBook Air M3 (8 frases, 14 idiomas de destino):
+
+| Dónde | Beams | Núcleos | Media por frase | Peor |
+|---|---|---|---|---|
+| **Procesador (por defecto)** | **1** | **4** | **1,89 s** | 2,81 s |
+| Procesador | 2 | 4 | 3,08 s | 4,36 s |
+| Procesador | 1 | 8 | 2,29 s | 3,39 s |
+| Tarjeta gráfica (`--mt-device mps`) | 1 | 4 | 1,62 s | 2,45 s |
+
+Se queda el procesador: la tarjeta gráfica es solo 0,27 s más rápida y la comparte Whisper.
+Probar `--mt-device mps` solo en un culto de prueba, mirando con `report.py` que Whisper no se ralentiza.
+Con un solo idioma (el intérprete) tarda unos 0,6 s.
 La página pide al servidor el idioma que tenga elegido como destino; si el servidor no puede,
 traduce Chrome como antes. Solo se traducen los idiomas que alguien pide.
 Antes de traducir se aplica el glosario bíblico (hoy solo hacia el español) y las frases fijas
