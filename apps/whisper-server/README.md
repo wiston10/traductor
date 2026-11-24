@@ -73,6 +73,7 @@ Las mismas pruebas corren solas en GitHub en cada push (`.github/workflows/ci.ym
 | `asr.py` | Motores Whisper (torch, mlx, simulado) y filtros del texto |
 | `translate.py` | Traducción NLLB, glosario y frases fijas (`vocab/frases-fijas.json`) |
 | `dialect.py` | Dialecto → alemán estándar (`vocab/dialecto-de.json`, revisado a mano) |
+| `rooms.py` | La sala: PIN, pases, reparto a los móviles por idioma, reconexión |
 | `protocol.py` | Formato de los mensajes: versión y número de frase |
 | `net.py` | Qué páginas pueden conectarse |
 
@@ -121,6 +122,36 @@ Con al menos 50 frases corregidas y la sesión marcada como **Prueba**:
 ```
 Cada línea dice el % de error y el tiempo medio por frase. Regla: se adopta una opción solo si
 baja el error sin subir el tiempo más de un 20 %.
+
+## Sala para los móviles (paso 5)
+
+Los oyentes siguen la prédica en su móvil, cada uno en su idioma, sin instalar nada.
+
+```bash
+npm run start:sala
+```
+1. En el Mac, abre **http://localhost:8765/sala**: muestra el **código QR** y el **PIN** en grande
+   (para proyectarlo o imprimirlo) y cuántos móviles hay conectados y en qué idiomas.
+2. Los oyentes, **en la misma red Wi-Fi que el Mac**, escanean el QR (o abren la dirección y escriben el PIN)
+   y eligen su idioma. Pueden agrandar la letra y ver también el original.
+3. El operador usa el apuntador como siempre (http://localhost:8765) y pulsa **Empezar**: cada frase
+   llega a los móviles; la traducción, ~2 s después.
+
+Cómo funciona por dentro:
+- Solo se traducen los idiomas que alguien escucha, todos de una vez (un lote).
+- Cada frase lleva un número: un móvil que pierde la conexión recibe al volver solo lo que se perdió.
+- Un solo socket por móvil (si el mismo móvil vuelve a entrar, se cierra el anterior).
+- El PIN va dentro del QR. Después el móvil guarda un **pase firmado** (secreto propio del servidor en
+  `.secret-sala`, no va a git) válido 6 h. Tras 8 PIN fallidos, esa dirección espera 5 minutos.
+- **Seguridad:** desde la red solo se puede abrir la página del oyente y su conexión. El audio, la
+  corrección, las frases guardadas y el modo idea solo funcionan desde el propio Mac.
+- La primera vez, macOS preguntará si Python puede aceptar conexiones entrantes: **Permitir**.
+- El PIN cambia en cada arranque. Para fijarlo: `npm run start:sala -- --pin 2026`.
+- Sin https (red local) el móvil puede apagar la pantalla; los oyentes pueden subir el tiempo de bloqueo.
+
+Medir el objetivo del paso 5 (90 % de las frases en menos de 3 s) después de un culto de prueba:
+`.venv/bin/python report.py` → línea «Retraso hasta la traducción». Se mide desde que el servidor
+cierra la frase (tras la pausa de 0,5 s) hasta que la traducción sale hacia los móviles.
 
 ## Prédicas en otros idiomas
 

@@ -3,3 +3,4 @@ torch==2.15.0
 transformers==5.23.0
 aiohttp==3.14.5
 numpy==2.5.5
+segno==1.6.1        # código QR de la sala (puro Python, licencia BSD)

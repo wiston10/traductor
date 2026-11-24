@@ -148,6 +148,7 @@
   <label id="saveWrap" title="Guarda en este Mac el audio y el texto de cada frase para corregirlos y entrenar el modelo (solo motor Whisper)">
     <input type="checkbox" id="saveTraining"> 💾 Guardar para entrenamiento <b id="savedInfo"></b></label>
   <a href="/corregir" target="_blank" id="corregirLink" title="Abrir la herramienta para corregir transcripciones">Corregir ↗</a>
+  <a href="/sala" target="_blank" id="salaLink" title="Código QR y PIN para que los oyentes sigan la prédica en su móvil">📱 Sala <b id="roomInfo"></b></a>
   <label for="audioSource">Audio:</label>
   <select id="audioSource">
     <option value="tab">De la transmisión (esta pestaña)</option>
@@ -748,6 +749,8 @@
         commitFinal(m.text || "", m.seq);
       } else if (m.type === "translation") {
         applyServerTranslation(m);
+      } else if (m.type === "room") {
+        $("roomInfo").textContent = m.listeners ? `(${m.listeners})` : "";
       } else if (m.type === "config_ok") {
         const tgt = trCode(el.tgt.value);
         state.serverTr = (m.translate || []).includes(tgt);
@@ -804,6 +807,7 @@
     el.saveWrap.classList.toggle("disabled", !whisper);
     // La herramienta de corrección solo existe si la página la sirve el servidor Whisper
     $("corregirLink").style.display = location.protocol.startsWith("http") ? "" : "none";
+    $("salaLink").style.display = location.protocol.startsWith("http") ? "" : "none";
   }
 
   function stopWhisper() {

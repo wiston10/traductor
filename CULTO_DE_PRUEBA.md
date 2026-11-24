@@ -19,11 +19,20 @@ La herramienta **no** debe ser imprescindible: si falla, nadie lo nota.
   - (opcional, con permiso) **💾 Guardar para entrenamiento**
 - [ ] Prueba de 1 minuto con el audio real (alabanza o anuncios): aparece texto y traducción.
 
+### Si se prueba también la sala de móviles (paso 5)
+- [ ] Arrancar con `npm run start:sala` (en vez de `npm start`). macOS: **Permitir** conexiones.
+- [ ] Mac y móviles en la **misma Wi-Fi** (la de invitados a veces aísla los aparatos entre sí: probar antes).
+- [ ] Abrir **http://localhost:8765/sala** y proyectar o imprimir el QR.
+- [ ] Al menos un **iPhone** y un **Android**, en idiomas distintos. Probar: bloquear la pantalla 1 minuto y
+      volver (debe recuperar las frases perdidas), cambiar de idioma, agrandar la letra.
+- [ ] Objetivo: 20 móviles a la vez.
+
 ## Durante el culto — apuntar solo esto
 | Hora | Qué pasó |
 |---|---|
 | | Idea que dice algo que el predicador **no** dijo (copiar la idea) |
 | | Aparece «Whisper va lento» o «Ideas en pausa» |
+| | Un móvil que se queda atrás, no reconecta o muestra «…» mucho rato (anotar modelo e idioma) |
 | | Cualquier otra cosa rara |
 
 (Tiempos, pausas y lentitud **se registran solos**: no hace falta apuntarlos.)

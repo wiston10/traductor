@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#111418">
+<title>Traducción en directo</title>
+<style>
+  :root {
+    --bg: #fbfaf7; --fg: #1b1d21; --muted: #6b6f76; --line: #e4e1da; --accent: #2b6cb0; --warn: #b7791f; --bad: #c53030;
+    --size: 22px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #111418; --fg: #eceae5; --muted: #9aa0a8; --line: #262b31; --accent: #63a4ff; --warn: #f6ad55; --bad: #fc8181; }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+    font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", sans-serif; }
+  body { display: flex; flex-direction: column; }
+  header { position: sticky; top: 0; z-index: 2; background: var(--bg); border-bottom: 1px solid var(--line);
+    padding: calc(env(safe-area-inset-top) + 8px) 12px 8px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .status { display: flex; align-items: center; gap: 6px; font-size: 14px; color: var(--muted); flex-basis: 100%; }
+  #lang { flex: 1; min-width: 0; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); flex: none; }
+  .dot.live { background: #38a169; } .dot.warn { background: var(--warn); } .dot.bad { background: var(--bad); }
+  select, button, input { font: inherit; color: var(--fg); background: transparent; border: 1px solid var(--line);
+    border-radius: 10px; padding: 8px 10px; min-height: 40px; }
+  button { cursor: pointer; }
+  button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+  main { flex: 1; overflow-y: auto; padding: 16px 16px calc(env(safe-area-inset-bottom) + 72px); }
+  .line { font-size: var(--size); line-height: 1.45; margin: 0 0 0.75em; }
+  .line.pending { color: var(--muted); }
+  .line .orig { display: none; font-size: 0.7em; color: var(--muted); margin-top: 2px; }
+  body.show-orig .line .orig { display: block; }
+  .line:last-child > span:first-child { font-weight: 600; }
+  .empty { color: var(--muted); text-align: center; margin-top: 30vh; font-size: 18px; }
+  #newer { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(env(safe-area-inset-bottom) + 16px);
+    border-radius: 999px; background: var(--accent); color: #fff; border: 0; padding: 10px 18px; display: none; }
+  #join { margin: 12vh auto 0; max-width: 320px; text-align: center; display: none; }
+  #join h1 { font-size: 22px; margin: 0 0 8px; }
+  #join p { color: var(--muted); margin: 0 0 16px; }
+  #pin { font-size: 28px; letter-spacing: 0.4em; text-align: center; width: 100%; margin-bottom: 12px; }
+  #joinBtn { width: 100%; background: var(--accent); color: #fff; border: 0; }
+  #joinMsg { color: var(--bad); min-height: 1.4em; margin-top: 10px; }
+  [dir="rtl"] .line { text-align: right; }
+</style>
+</head>
+<body>
+<header>
+  <div class="status"><span class="dot" id="dot"></span><span id="statusText">Conectando…</span></div>
+  <select id="lang" aria-label="Idioma"></select>
+  <button id="smaller" aria-label="Letra más pequeña">A−</button>
+  <button id="bigger" aria-label="Letra más grande">A+</button>
+  <button id="origBtn" aria-pressed="false" aria-label="Original">Original</button>
+</header>
+<main id="main">
+  <section id="join">
+    <h1>Traducción en directo</h1>
+    <p>Escribe el PIN que aparece en la pantalla.</p>
+    <input id="pin" inputmode="numeric" autocomplete="one-time-code" maxlength="8" aria-label="PIN">
+    <button id="joinBtn">Entrar</button>
+    <div id="joinMsg"></div>
+  </section>
+  <div id="lines" aria-live="polite"><p class="empty" id="empty">Esperando la primera frase…</p></div>
+</main>
+<button id="newer">↓ Frases nuevas</button>
+<script>
+(() => {
+  "use strict";
+  const LANGS = [
+    ["es", "Español"], ["en", "English"], ["zh", "中文"], ["hi", "हिन्दी"], ["ar", "العربية"],
+    ["fr", "Français"], ["bn", "বাংলা"], ["pt", "Português"], ["id", "Bahasa Indonesia"], ["ur", "اردو"],
+    ["ru", "Русский"], ["de", "Deutsch"], ["ja", "日本語"], ["mr", "मराठी"], ["vi", "Tiếng Việt"],
+    ["it", "Italiano"], ["tr", "Türkçe"], ["uk", "Українська"], ["fa", "فارسی"], ["ti", "ትግርኛ"], ["pl", "Polski"]
+  ];
+  const RTL = new Set(["ar", "ur", "fa"]);
+  // Textos de la pantalla: en el idioma elegido si están revisados; si no, en inglés
+  const UI = {
+    es: { live: "En directo", waiting: "Esperando a que empiece", connecting: "Conectando…", retrying: "Sin conexión · reintentando",
+      off: "Sin conectar", title: "Traducción en directo", help: "Escribe el PIN que aparece en la pantalla.", enter: "Entrar",
+      first: "Esperando la primera frase…", newer: "↓ Frases nuevas", orig: "Original", badpin: "PIN incorrecto", wait: "Demasiados intentos: espera unos minutos", full: "La sala está llena" },
+    en: { live: "Live", waiting: "Waiting for the service to start", connecting: "Connecting…", retrying: "No connection · retrying",
+      off: "Not connected", title: "Live translation", help: "Enter the PIN shown on the screen.", enter: "Join",
+      first: "Waiting for the first sentence…", newer: "↓ New sentences", orig: "Original", badpin: "Wrong PIN", wait: "Too many attempts: wait a few minutes", full: "The room is full" },
+    de: { live: "Live", waiting: "Wartet auf den Beginn", connecting: "Verbinde…", retrying: "Keine Verbindung · neuer Versuch",
+      off: "Nicht verbunden", title: "Live-Übersetzung", help: "Gib die PIN ein, die auf dem Bildschirm steht.", enter: "Beitreten",
+      first: "Warte auf den ersten Satz…", newer: "↓ Neue Sätze", orig: "Original", badpin: "Falsche PIN", wait: "Zu viele Versuche: bitte ein paar Minuten warten", full: "Der Raum ist voll" },
+    fr: { live: "En direct", waiting: "En attente du début", connecting: "Connexion…", retrying: "Pas de connexion · nouvel essai",
+      off: "Non connecté", title: "Traduction en direct", help: "Saisissez le code PIN affiché à l’écran.", enter: "Entrer",
+      first: "En attente de la première phrase…", newer: "↓ Nouvelles phrases", orig: "Original", badpin: "Code PIN incorrect", wait: "Trop d’essais : attendez quelques minutes", full: "La salle est pleine" },
+    pt: { live: "Ao vivo", waiting: "Aguardando o início", connecting: "Conectando…", retrying: "Sem conexão · tentando de novo",
+      off: "Desconectado", title: "Tradução ao vivo", help: "Digite o PIN que aparece na tela.", enter: "Entrar",
+      first: "Aguardando a primeira frase…", newer: "↓ Novas frases", orig: "Original", badpin: "PIN incorreto", wait: "Tentativas demais: espere alguns minutos", full: "A sala está cheia" },
+    it: { live: "In diretta", waiting: "In attesa dell’inizio", connecting: "Connessione…", retrying: "Nessuna connessione · nuovo tentativo",
+      off: "Non connesso", title: "Traduzione in diretta", help: "Inserisci il PIN mostrato sullo schermo.", enter: "Entra",
+      first: "In attesa della prima frase…", newer: "↓ Nuove frasi", orig: "Originale", badpin: "PIN errato", wait: "Troppi tentativi: attendi qualche minuto", full: "La sala è piena" }
+  };
+  const t = (k) => (UI[lang] || UI.en)[k];
+  let lastState = "";
+  const $ = (id) => document.getElementById(id);
+  const el = { dot: $("dot"), status: $("statusText"), lang: $("lang"), main: $("main"), lines: $("lines"),
+    empty: $("empty"), newer: $("newer"), join: $("join"), pin: $("pin"), joinBtn: $("joinBtn"),
+    joinMsg: $("joinMsg"), smaller: $("smaller"), bigger: $("bigger"), origBtn: $("origBtn") };
+
+  // Almacenamiento del móvil: puede no existir (modo privado); nunca debe romper la página
+  const store = {
+    get(k, d) { try { const v = localStorage.getItem("oyente." + k); return v === null ? d : v; } catch { return d; } },
+    set(k, v) { try { localStorage.setItem("oyente." + k, String(v)); } catch { /* sin memoria: da igual */ } },
+    del(k) { try { localStorage.removeItem("oyente." + k); } catch { /* idem */ } }
+  };
+  const randomId = () => {
+    const a = new Uint8Array(12);
+    (self.crypto || {}).getRandomValues ? crypto.getRandomValues(a) : a.forEach((_, i) => { a[i] = Math.random() * 256; });
+    return Array.from(a, (b) => b.toString(16).padStart(2, "0")).join("");
+  };
+  let device = store.get("device", "");
+  if (!/^[A-Za-z0-9_-]{8,64}$/.test(device)) { device = randomId(); store.set("device", device); }
+
+  const params = new URLSearchParams(location.search);
+  let pin = params.get("pin") || "";
+  if (pin) history.replaceState(null, "", location.pathname);     // el PIN no se queda en la barra
+  let token = store.get("token", "");
+  let epoch = store.get("epoch", "");
+  const lines = new Map();                                        // seq → {el, pending}
+  const navLang = (navigator.language || "es").split("-")[0];
+  let lang = store.get("lang", LANGS.some(([c]) => c === navLang) ? navLang : "es");
+
+  for (const [code, name] of LANGS) {
+    const o = document.createElement("option");
+    o.value = code; o.textContent = name;
+    el.lang.appendChild(o);
+  }
+  el.lang.value = lang;
+  applyDir();
+
+  let size = Number(store.get("size", 22)) || 22;
+  const applySize = () => document.documentElement.style.setProperty("--size", size + "px");
+  applySize();
+  el.smaller.addEventListener("click", () => { size = Math.max(14, size - 2); store.set("size", size); applySize(); });
+  el.bigger.addEventListener("click", () => { size = Math.min(44, size + 2); store.set("size", size); applySize(); });
+  const setOrig = (on) => { document.body.classList.toggle("show-orig", on); el.origBtn.setAttribute("aria-pressed", String(on)); store.set("orig", on ? "1" : "0"); };
+  setOrig(store.get("orig", "0") === "1");
+  el.origBtn.addEventListener("click", () => setOrig(!document.body.classList.contains("show-orig")));
+
+  function applyDir() {
+    el.lines.dir = RTL.has(lang) ? "rtl" : "ltr";
+    document.documentElement.lang = lang;
+    document.querySelector("#join h1").textContent = t("title");
+    document.querySelector("#join p").textContent = t("help");
+    el.joinBtn.textContent = t("enter");
+    el.empty.textContent = t("first");
+    el.newer.textContent = t("newer");
+    el.origBtn.textContent = t("orig");
+    document.title = t("title");
+    if (lastState) state(lastState);
+  }
+  function setStatus(kind, text) { el.dot.className = "dot " + kind; el.status.textContent = text; }
+
+  // --- lista de frases ---
+  function nearBottom() { return el.main.scrollHeight - el.main.scrollTop - el.main.clientHeight < 80; }
+  function scrollDown() { el.main.scrollTop = el.main.scrollHeight; el.newer.style.display = "none"; }
+  el.main.addEventListener("scroll", () => { if (nearBottom()) el.newer.style.display = "none"; });
+  el.newer.addEventListener("click", scrollDown);
+
+  function clearLines() { lines.clear(); el.lines.textContent = ""; el.lines.appendChild(el.empty); el.empty.style.display = ""; }
+  function upsert(m) {
+    const follow = nearBottom();
+    let item = lines.get(m.seq);
+    if (!item) {
+      const p = document.createElement("p");
+      p.className = "line";
+      const txt = document.createElement("span");
+      const o = document.createElement("span");
+      o.className = "orig";
+      txt.dir = "auto"; o.dir = "auto";              // el original alemán no se invierte en árabe
+      p.append(txt, o);
+      // en orden por número de frase (una reconexión puede traer frases antiguas)
+      const after = [...lines.keys()].filter((s) => s > m.seq).sort((a, b) => a - b)[0];
+      el.lines.insertBefore(p, after !== undefined ? lines.get(after).el : null);
+      item = { el: p, text: txt, orig: o, pending: true };
+      lines.set(m.seq, item);
+      el.empty.style.display = "none";
+      while (lines.size > 400) { const first = Math.min(...lines.keys()); lines.get(first).el.remove(); lines.delete(first); }
+    }
+    item.pending = Boolean(m.pending);
+    item.el.classList.toggle("pending", item.pending);
+    item.text.textContent = item.pending ? "…" : m.text;
+    item.orig.textContent = m.orig && m.orig !== m.text ? m.orig : "";
+    if (follow) scrollDown(); else el.newer.style.display = "block";
+  }
+  // Hasta qué frase está todo recibido (para pedir solo lo que falte al reconectar)
+  function since() {
+    let best = 0;
+    for (const s of [...lines.keys()].sort((a, b) => a - b)) { if (lines.get(s).pending) break; best = s; }
+    return best;
+  }
+
+  // --- conexión: un solo socket, reconexión con espera creciente ---
+  let ws = null, retry = 0, timer = null, joined = false;
+  function connect() {
+    clearTimeout(timer);
+    if (ws) { ws.onclose = null; try { ws.close(); } catch { /* ya cerrado */ } ws = null; }
+    if (!pin && !token) { showJoin(""); return; }
+    setStatus("warn", t("connecting"));
+    const sock = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/oyente");
+    ws = sock;
+    sock.onopen = () => {
+      const hello = { type: "hello", device, lang, epoch, since: epoch ? since() : null };
+      if (token) hello.token = token; else hello.pin = pin;
+      if (pin) hello.pin = pin;
+      sock.send(JSON.stringify(hello));
+    };
+    sock.onmessage = (e) => {
+      let m; try { m = JSON.parse(e.data); } catch { return; }
+      if (m.type === "welcome") {
+        retry = 0; joined = true; hideJoin();
+        token = m.token; store.set("token", token); pin = "";
+        if (m.epoch !== epoch) { clearLines(); epoch = m.epoch; store.set("epoch", epoch); }
+        lang = m.lang; el.lang.value = lang; store.set("lang", lang); applyDir();
+        state(m.state);
+      } else if (m.type === "line") upsert(m);
+      else if (m.type === "reset") { clearLines(); lang = m.lang; applyDir(); }
+      else if (m.type === "state") state(m.state);
+      else if (m.type === "error") {
+        if (m.code === "pin" || m.code === "wait") {
+          token = ""; store.del("token"); pin = ""; joined = false;
+          showJoin(t(m.code === "pin" ? "badpin" : "wait"));
+        } else setStatus("bad", m.code === "full" ? t("full") : m.text);
+      }
+    };
+    sock.onclose = () => {
+      if (ws !== sock) return;
+      ws = null;
+      if (!joined && !token && !pin) return;                     // esperando PIN
+      retry = Math.min(retry + 1, 6);
+      setStatus("bad", t("retrying"));
+      timer = setTimeout(connect, Math.min(10000, 500 * 2 ** retry));
+    };
+  }
+  function state(s) { lastState = s; s === "live" ? setStatus("live", t("live")) : setStatus("warn", t("waiting")); }
+  function showJoin(msg) { el.join.style.display = "block"; el.lines.style.display = "none"; el.joinMsg.textContent = msg || ""; setStatus("", t("off")); el.pin.focus(); }
+  function hideJoin() { el.join.style.display = "none"; el.lines.style.display = ""; }
+  el.joinBtn.addEventListener("click", () => {
+    pin = el.pin.value.trim();
+    if (!pin) return;
+    el.joinMsg.textContent = "";
+    connect();
+  });
+  el.pin.addEventListener("keydown", (e) => { if (e.key === "Enter") el.joinBtn.click(); });
+
+  el.lang.addEventListener("change", () => {
+    lang = el.lang.value; store.set("lang", lang); applyDir();
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "lang", lang }));
+  });
+
+  // Al volver a la pantalla (el móvil suspende las páginas): reconectar si hace falta
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && (!ws || ws.readyState > 1) && (token || pin)) { retry = 0; connect(); }
+    if (document.visibilityState === "visible") keepAwake();
+  });
+  // Pantalla encendida (solo en https; en la red local sin https el móvil puede apagarla)
+  let lock = null;
+  async function keepAwake() {
+    try { if ("wakeLock" in navigator && !lock) { lock = await navigator.wakeLock.request("screen"); lock.addEventListener("release", () => { lock = null; }); } }
+    catch { /* no disponible */ }
+  }
+  keepAwake();
+  connect();
+})();
+</script>
+</body>
+</html>

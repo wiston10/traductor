@@ -83,3 +83,4 @@ Thumbs.db
 
 # --- Sugerencias generadas (se revisan a mano antes de usarlas) ---
 /apps/whisper-server/vocab/dialecto-sugerencias.json
+/apps/whisper-server/.secret-sala

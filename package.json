@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "start": "cd apps/whisper-server && .venv/bin/python server.py",
+    "start:sala": "cd apps/whisper-server && .venv/bin/python server.py --host 0.0.0.0",
     "start:mock": "cd apps/whisper-server && .venv/bin/python server.py --engine mock",
     "setup:mlx": "bash tools/convert_to_mlx.sh",
     "setup:nllb": "bash tools/setup_nllb.sh",

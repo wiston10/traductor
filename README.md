@@ -5,8 +5,8 @@ Herramienta gratuita para una organización sin ánimo de lucro. Ayuda a la pers
 francés o inglés), en la pantalla del intérprete aparece lo que se dice y una traducción
 automática, a un ritmo que se puede leer. El intérprete lee, corrige y habla.
 
-Hacia dónde va (plan paso a paso en el documento del proyecto): que los oyentes sigan la
-prédica en su móvil en cualquiera de los 15 idiomas más hablados, y más adelante escucharla.
+Además, los **oyentes** pueden seguir la prédica en su móvil, cada uno en su idioma (15 idiomas),
+escaneando un código QR (`npm run start:sala`). Más adelante (v2), también escucharla.
 
 No usa APIs de pago ni claves: el reconocimiento de voz y la traducción corren en el
 navegador o en el propio Mac.
@@ -27,6 +27,8 @@ navegador o en el propio Mac.
             │ texto traducido
             ▼
  Pantalla del intérprete: ritmo de lectura ajustable + línea guía
+            │
+            └──► Móviles de los oyentes (QR + PIN, misma Wi-Fi): cada uno en su idioma
 ```
 
 ## Estructura
@@ -58,6 +60,9 @@ Abre **http://localhost:8765** en Google Chrome (versión 138 o posterior, en or
 2. Elige el motor: **Whisper** para suizo alemán; **Chrome** para alemán estándar, francés o inglés.
 3. Pulsa **Empezar** y, si usas el audio del directo, comparte la pestaña con **«Compartir audio»**.
 4. Ajusta el **ritmo de lectura** y la **línea guía**.
+
+Para que los oyentes lo sigan en el móvil: arranca con `npm run start:sala` y abre
+**http://localhost:8765/sala** (código QR y PIN para proyectar).
 
 Más detalles: [`apps/web/README.md`](apps/web/README.md) y
 [`apps/whisper-server/README.md`](apps/whisper-server/README.md).

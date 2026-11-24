@@ -7,6 +7,7 @@ Informe de rendimiento de una sesión (p. ej. el culto de prueba).
 
 Responde a: ¿Whisper fue rápido todo el culto o se ralentizó al calentarse el Mac?
 ¿Cuánto tardaron las ideas? ¿Cuántas veces se pausaron para proteger la transcripción?
+¿Llegó la traducción a los móviles en menos de 3 s en el 90 % de las frases (paso 5)?
 """
 from __future__ import annotations
 
@@ -50,7 +51,7 @@ def main() -> None:
     whisper = [e for e in events if e.get("ev") == "whisper"]
     ideas = [e for e in events if e.get("ev") == "idea"]
     start = next((e for e in events if e.get("ev") == "start"), {})
-    if not whisper and not ideas:
+    if not whisper and not ideas and not any(e.get("ev") == "latency" for e in events):
         print(f"{path.name}: la sesión no tiene datos (¿se llegó a pulsar «Empezar»?).")
         return
 
@@ -107,6 +108,14 @@ def main() -> None:
             print(f"  · Se ralentizó con el tiempo ({statistics.median(firsts):.2f} s → {statistics.median(lasts):.2f} s): "
                   "probablemente el Mac se calentó. Prueba con el Mac sobre una superficie fresca, "
                   "enchufado, o sin modo idea.")
+    lat = [e["ms"] / 1000 for e in events if e.get("ev") == "latency"]
+    if lat:
+        within = 100 * sum(1 for x in lat if x < 3.0) / len(lat)
+        langs = max(e.get("langs", 0) for e in events if e.get("ev") == "latency")
+        ok = "cumple" if within >= 90 else "NO cumple"
+        print(f"  · Retraso hasta la traducción (fin de la frase → móviles): típico {statistics.median(lat):.1f} s, "
+              f"peor (p90) {pct(lat, 90):.1f} s · {within:.0f} % en menos de 3 s → {ok} el objetivo del 90 % "
+              f"(hasta {langs} idiomas a la vez).")
     if ideas:
         if ok_all:
             print(f"  · Ideas: {counts['ok']} mostradas, típico {statistics.median(ok_all):.1f} s "

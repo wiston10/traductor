@@ -15,10 +15,24 @@ Servidor → página
   {"v":1,"type":"saved","count":…,"minutes":…,"session":…}
   {"v":1,"type":"flushed"}
 
+  {"v":1,"type":"room","listeners":N,"langs":{"es":3,…}}     (cuántos móviles escuchan)
+
 Página → servidor
   {"type":"config","save":bool,"src":"de-CH","targets":["es",…]}
   {"type":"flush"}
   (audio: mensajes binarios PCM int16, 16 kHz, mono)
+
+Móvil del oyente  (/ws/oyente)
+  móvil → servidor:
+    {"type":"hello","pin":"1234"|"token":…,"device":…,"lang":"es","epoch":…,"since":N}
+    {"type":"lang","lang":"en"}
+  servidor → móvil:
+    {"v":1,"type":"welcome","epoch":…,"lang":"es","src":"de","token":…,"state":"live|waiting"}
+    {"v":1,"type":"line","seq":N,"text":…,"lang":"es","orig":…,"pending":bool}
+        (la misma frase puede llegar dos veces: primero pendiente, luego traducida)
+    {"v":1,"type":"reset","lang":"en"}      (cambió de idioma: se vuelve a llenar)
+    {"v":1,"type":"state","state":"live|waiting"}
+    {"v":1,"type":"error","code":"pin|wait|bad","text":…}
 """
 from __future__ import annotations
 
@@ -60,6 +74,33 @@ def saved(count: int, seconds: float, session: str) -> dict:
 
 def flushed() -> dict:
     return _msg("flushed")
+
+
+def room(listeners: int, langs: dict[str, int]) -> dict:
+    return _msg("room", listeners=listeners, langs=langs)
+
+
+def welcome(epoch: str, lang: str, src: str, token: str, state: str) -> dict:
+    return _msg("welcome", epoch=epoch, lang=lang, src=src, token=token, state=state)
+
+
+def line(seq: int, text: str, lang: str, orig: str = "", pending: bool = False) -> dict:
+    m = _msg("line", seq=seq, text=text, lang=lang, orig=orig)
+    if pending:
+        m["pending"] = True
+    return m
+
+
+def reset(lang: str) -> dict:
+    return _msg("reset", lang=lang)
+
+
+def room_state(state: str) -> dict:
+    return _msg("state", state=state)
+
+
+def error(code: str, text: str) -> dict:
+    return _msg("error", code=code, text=text)
 
 
 def parse(raw: str) -> dict | None:

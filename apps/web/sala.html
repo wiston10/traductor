@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sala · QR para los oyentes</title>
+<style>
+  :root { --bg: #fff; --fg: #15171a; --muted: #5f646b; --line: #e3e3e3; --warn: #9c5d00; --warnbg: #fff4e0; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 18px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px; text-align: center; }
+  h1 { font-size: 34px; margin: 0 0 6px; }
+  .sub { color: var(--muted); margin: 0 0 24px; }
+  #qr { width: min(60vh, 80vw); height: min(60vh, 80vw); image-rendering: pixelated; }
+  #noqr { display: none; color: var(--muted); max-width: 520px; }
+  .pin { font-size: 64px; font-weight: 700; letter-spacing: 0.15em; margin: 12px 0 0; }
+  .url { font-size: 20px; color: var(--muted); word-break: break-all; margin: 4px 0 18px; }
+  .stats { font-size: 20px; }
+  .warn { display: none; background: var(--warnbg); color: var(--warn); border-radius: 12px; padding: 14px 18px; max-width: 640px; margin-bottom: 20px; text-align: left; }
+  code { background: #f1f1f1; padding: 2px 6px; border-radius: 6px; }
+  button { font: inherit; padding: 8px 14px; border-radius: 10px; border: 1px solid var(--line); background: #fff; cursor: pointer; margin-top: 12px; }
+</style>
+</head>
+<body>
+  <div class="warn" id="warn">
+    <strong>Los móviles aún no pueden entrar.</strong> El servidor solo escucha en este ordenador.
+    Páralo y arráncalo con <code>npm run start:sala</code>. Los móviles tienen que estar en la misma red Wi-Fi
+    que este Mac. La primera vez, macOS preguntará si Python puede aceptar conexiones: pulsa <em>Permitir</em>.
+  </div>
+  <h1>Traducción en directo en tu móvil</h1>
+  <p class="sub">Escanea el código con la cámara · misma red Wi-Fi</p>
+  <img id="qr" alt="Código QR para entrar en la sala">
+  <p id="noqr">Para ver el código QR instala segno: <code>cd apps/whisper-server && .venv/bin/pip install -r requirements.txt</code></p>
+  <p class="pin">PIN <span id="pin">····</span></p>
+  <p class="url" id="url"></p>
+  <p class="stats" id="stats">Cargando…</p>
+  <button id="copy">Copiar enlace</button>
+<script>
+(() => {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  let names = {}, url = "";
+  $("qr").addEventListener("error", () => { $("qr").style.display = "none"; $("noqr").style.display = "block"; });
+  $("copy").addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(url); $("copy").textContent = "Copiado"; }
+    catch { $("copy").textContent = url; }
+  });
+  async function refresh() {
+    try {
+      const r = await (await fetch("/api/room", { cache: "no-store" })).json();
+      names = r.languages || names;
+      if (r.url !== url) { url = r.url; $("qr").src = "/api/qr.svg?u=" + encodeURIComponent(url); }
+      $("pin").textContent = r.pin;
+      $("url").textContent = r.base + "/oyente";
+      $("warn").style.display = r.reachable ? "none" : "block";
+      const langs = Object.entries(r.langs || {}).map(([k, n]) => `${names[k] || k} ${n}`).join(" · ");
+      $("stats").textContent = `📱 ${r.listeners} ${r.listeners === 1 ? "oyente" : "oyentes"}` +
+        (langs ? ` — ${langs}` : "") + (r.operator ? " · en directo" : " · esperando al operador") +
+        (r.translate ? "" : " · ⚠ sin traducción en el servidor (npm run setup:nllb)");
+    } catch {
+      $("stats").textContent = "No se encuentra el servidor (¿está arrancado?)";
+    }
+  }
+  refresh();
+  setInterval(refresh, 2000);
+})();
+</script>
+</body>
+</html>

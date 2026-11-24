@@ -9,6 +9,7 @@ por eso este proyecto **no se puede vender ni ofrecer como servicio de pago** mi
 | [openai/whisper-large-v3-turbo](https://huggingface.co/openai/whisper-large-v3-turbo) | Transcribir otros idiomas | MIT | Sí |
 | [facebook/nllb-200-distilled-600M](https://huggingface.co/facebook/nllb-200-distilled-600M) | Traducir entre 15 idiomas | CC BY-NC 4.0 | No |
 | Ollama + gemma3:4b (opcional) | Modo idea | Licencia de Gemma | Revisar |
+| segno | Código QR de la sala | BSD-3-Clause | Sí |
 | Glosario bíblico (`apps/web/glossary/`) | Términos fijos | Generado de Biblias de dominio público (Elberfelder 1905, Crampon 1923, ASV 1901, Reina-Valera 1909) | Sí |
 
 Si algún día hiciera falta uso comercial: Whisper general (MIT) en lugar del suizo, y
