@@ -2,8 +2,9 @@
 
 El reconocimiento de voz de Chrome está pensado para alemán estándar y falla con
 el dialecto suizo. Este servidor ejecuta en tu Mac un modelo Whisper ajustado para
-suizo alemán, que **escucha dialecto y escribe en alemán estándar**. Después, la
-página traduce ese texto al español como siempre.
+suizo alemán, que **escucha dialecto y escribe en alemán estándar**. Después traduce
+cada frase con **NLLB-200** (también en el Mac) a los idiomas que pida la página; si NLLB
+no está instalado, traduce Chrome como antes.
 
 Gratis, sin claves y el audio no sale del ordenador.
 
@@ -33,11 +34,17 @@ En la barra elige **Voz: Whisper suizo-alemán** y pulsa **Empezar**.
 ## Ajustes útiles
 | Opción | Por defecto | Qué hace |
 |---|---|---|
-| `--partial-every 0.7` | 1.0 | Texto provisional más frecuente (más rápido, más carga) |
+| `--partial-every 1` | 0 (apagado) | Texto provisional (en un M3 satura el Mac; ver «Configuración recomendada») |
 | `--max-seg 5` | 6 | Corta antes cuando el predicador no hace pausas |
 | `--silence 0.4` | 0.5 | Pausa más corta para cerrar frase |
 | `--model …` | `Flurin17/whisper-large-v3-turbo-swiss-german` | Probar otro modelo, p. ej. `nizarmichaud/whisper-large-v3-turbo-swissgerman` |
-| `--vocab` | apagado | Da a Whisper una lista de nombres bíblicos y términos de iglesia (`vocab/de.txt`) para reconocerlos mejor. Pruébalo y compara |
+| `--vocab` | apagado | Lista de nombres bíblicos para Whisper (`vocab/de.txt`). **Medir antes**: una lista con comas puede hacer que Whisper invente listas (las frases así se descartan solas) |
+| `--gate-db -45` | -50 | Puerta de volumen: frases más flojas no se mandan al modelo. `-200` la apaga |
+| `--beam 3` | 1 | Búsqueda más amplia en frases definitivas: quizá más acierto, seguro más lento. Medir |
+| `--context confirmed` | none | Da a Whisper el final de la frase anterior como contexto. Medir |
+| `--translate off` | auto | Traducción NLLB en el servidor (auto = si está instalada) |
+| `--mt-beams 1` | 2 | Traducción más rápida (algo menos cuidada) |
+| `--engine mock` | torch | Whisper **simulado**: sin modelo, para probar todo lo demás |
 | `--verbose` | — | Muestra cuánto tarda cada paso |
 | `--allow-origin URL` | — | Permitir que otra web (p. ej. la página publicada en GitHub Pages) use el servidor |
 
@@ -50,10 +57,64 @@ en el navegador no puede usar el servidor a escondidas.
 
 ## Pruebas
 ```bash
-python3 test_server.py
+npm test                      # desde la raíz: páginas + servidor
+.venv/bin/python run_tests.py # solo el servidor
 ```
-Comprueban los cortes de frase, el descarte de ruidos cortos, la voz con volumen bajo
-y el filtro de seguridad, sin cargar el modelo.
+No cargan ningún modelo (Whisper y traductor simulados): cortes de frase, puerta de volumen,
+filtros, glosario, frases fijas, protocolo y una prueba de punta a punta por WebSocket.
+Las mismas pruebas corren solas en GitHub en cada push (`.github/workflows/ci.yml`).
+
+## Cómo está organizado
+
+| Archivo | Qué hace |
+|---|---|
+| `server.py` | Web y WebSocket: une todo lo demás |
+| `segmenter.py` | Corta el audio en frases (+ puerta de volumen) |
+| `asr.py` | Motores Whisper (torch, mlx, simulado) y filtros del texto |
+| `translate.py` | Traducción NLLB, glosario y frases fijas (`vocab/frases-fijas.json`) |
+| `dialect.py` | Dialecto → alemán estándar (`vocab/dialecto-de.json`, revisado a mano) |
+| `protocol.py` | Formato de los mensajes: versión y número de frase |
+| `net.py` | Qué páginas pueden conectarse |
+
+## Traducción en el servidor (NLLB-200, 15 idiomas)
+
+Un solo modelo traduce entre los 15 idiomas más hablados en cualquier dirección: inglés, chino,
+hindi, español, árabe, francés, bengalí, portugués, indonesio, urdu, ruso, alemán, japonés,
+maratí y vietnamita. Corre en el procesador, así la tarjeta gráfica queda para Whisper.
+**Licencia CC BY-NC 4.0: solo uso no comercial** (ver `AVISO_LICENCIAS.md`).
+
+```bash
+npm run setup:nllb   # una vez: instala CTranslate2 y convierte el modelo (~600 MB)
+npm run bench:mt     # ¿cuánto tarda en traducir a 1, 3, 5 y 15 idiomas? Objetivo: < 2 s con 15
+npm start            # ya traduce solo
+```
+La página pide al servidor el idioma que tenga elegido como destino; si el servidor no puede,
+traduce Chrome como antes. Solo se traducen los idiomas que alguien pide.
+Antes de traducir se aplica el glosario bíblico (hoy solo hacia el español) y las frases fijas
+(«Amen.», «Halleluja!») en los idiomas con forma revisada.
+
+## Medir opciones de transcripción (paso 2 del plan)
+
+Con al menos 50 frases corregidas y la sesión marcada como **Prueba**:
+```bash
+.venv/bin/python evaluate.py                                   # punto de partida (en directo)
+.venv/bin/python evaluate.py --model suizo                     # volver a transcribir, base
+.venv/bin/python evaluate.py --model suizo --beam 3            # ¿beam ayuda? ¿cuánto más lento?
+.venv/bin/python evaluate.py --model suizo --context confirmed # ¿ayuda la frase anterior?
+.venv/bin/python evaluate.py --model suizo --vocab             # ¿ayuda el vocabulario?
+.venv/bin/python evaluate.py --model suizo --gate-db -45       # ¿la puerta quita frases buenas?
+.venv/bin/python evaluate.py --sugerir-dialecto                # palabras de dialecto que corriges siempre
+```
+Cada línea dice el % de error y el tiempo medio por frase. Regla: se adopta una opción solo si
+baja el error sin subir el tiempo más de un 20 %.
+
+## Prédicas en otros idiomas
+
+El modelo suizo solo entiende alemán y suizo alemán. Para una prédica en inglés, español,
+francés u otro idioma, arranca con el Whisper general e indica el idioma:
+```bash
+npm start -- --model turbo --language en
+```
 
 ## Guardar frases para entrenar (fase 2)
 
@@ -68,7 +129,7 @@ y el filtro de seguridad, sin cargar el modelo.
    ```bash
    .venv/bin/python evaluate.py                 # % de error en directo y palabras que más falla
    .venv/bin/python evaluate.py --model <otro>  # comparar otro modelo con las sesiones de prueba
-   .venv/bin/python evaluate.py --model Flurin17/whisper-large-v3-turbo-swiss-german --vocab  # ¿ayuda --vocab?
+   .venv/bin/python evaluate.py --model suizo --vocab  # ¿ayuda --vocab? (más opciones abajo)
    ```
 4. Cuando haya 10–20 h corregidas, exporta el conjunto para entrenar:
    ```bash

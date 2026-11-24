@@ -1,8 +1,21 @@
 #!/usr/bin/env python3
-"""Pruebas rápidas del servidor (no cargan el modelo). Uso: python3 test_server.py"""
+"""Pruebas rápidas (sin modelos ni aiohttp). Uso: python3 run_tests.py  (o este archivo solo)"""
 import numpy as np
 
-import server as s
+import asr
+import net
+import segmenter
+
+# Nombres de siempre, ahora repartidos en módulos
+class s:  # noqa: N801
+    Segmenter = segmenter.Segmenter
+    origin_allowed = staticmethod(net.origin_allowed)
+    strip_prompt = staticmethod(asr.strip_prompt)
+    echoes_prompt = staticmethod(asr.echoes_prompt)
+    looks_broken = staticmethod(asr.looks_broken)
+    resolve_mlx_model = staticmethod(asr.resolve_mlx_model)
+    MLX_SWISS_PATH = asr.MLX_SWISS_PATH
+    DEFAULT_MODEL = asr.DEFAULT_MODEL
 
 SR = 16000
 rng = np.random.default_rng(0)
@@ -181,6 +194,81 @@ def test_detector_de_bucles():
     assert not s.looks_broken("Denn der Geist, den Gott uns gegeben hat, macht uns nicht.")
     assert not s.looks_broken("Ich lasse vor, darum bitte ich dich, lass Gottes Gabe voll in dir wirksam werden.")
     assert not s.looks_broken("")
+
+
+def test_puerta_de_volumen():
+    # Por defecto (-50 dB) la voz floja de una pestaña con poco volumen PASA
+    seg = s.Segmenter(0, 0.5, 6.0, gate_db=-50)
+    finals = []
+    audio = np.concatenate([sil(1), voice(2, amp=0.012), sil(1)])
+    for i in range(0, len(audio), 1600):
+        seg.add((audio[i:i + 1600] * 32767).astype(np.int16).tobytes())
+        k, a = seg.decide(i / SR)
+        if k == "final":
+            finals.append(a)
+    assert len(finals) == 1 and seg.gated == 0
+    # Con una puerta más alta, esa misma frase NO se manda al modelo
+    seg = s.Segmenter(0, 0.5, 6.0, gate_db=-30)
+    for i in range(0, len(audio), 1600):
+        seg.add((audio[i:i + 1600] * 32767).astype(np.int16).tobytes())
+        k, _ = seg.decide(i / SR)
+        assert k is None
+    assert seg.gated == 1
+    assert segmenter.level_db(voice(1, amp=0.2)) > -20 > segmenter.level_db(voice(1, amp=0.01))
+
+
+def test_lista_de_palabras_se_descarta():
+    # Fallo documentado por Barnaba: Whisper «lee» el glosario como lista
+    assert asr.looks_like_list("Grossrat, Grossrätin, Schäupte, Schöttemberg, Schubstabe, Schutze")
+    assert asr.looks_like_list("Matthäus, Markus, Lukas, Johannes, Apostelgeschichte.")
+    assert not asr.looks_like_list("Matthäus, Markus und Lukas erzählen, was Jesus tat.")
+    assert not asr.looks_like_list("Ja, ich bin sicher, Jesus ist dir begegnet.")
+    assert asr.should_drop("Matthäus, Markus, Lukas, Johannes, Römer.")
+
+
+def test_contexto_frase_anterior():
+    largo = "Und Jesus sprach zu ihnen: " + "Folgt mir nach, " * 20 + "und ich mache euch zu Menschenfischern."
+    tail = asr.context_tail(largo)
+    assert len(tail) <= asr.CONTEXT_CHARS and tail.endswith("Menschenfischern.") and not tail.startswith(" ")
+    m = asr.MockTranscriber(context="confirmed")
+    assert m.prompt_for("Gott liebt uns.") == "Gott liebt uns."
+    assert asr.MockTranscriber().prompt_for("Gott liebt uns.") == ""          # sin --context: nada
+    m.prompt_text = "Jesus Christus, Heiliger Geist"
+    assert m.prompt_for("Gott liebt uns.") == "Jesus Christus, Heiliger Geist"  # el vocabulario manda
+
+
+def test_whisper_simulado():
+    m = asr.MockTranscriber()
+    assert m._run(np.zeros(int(0.1 * SR), dtype=np.float32)) == ""
+    assert m._run(np.zeros(2 * SR, dtype=np.float32)) == "Satz 2 mit 2.0 Sekunden."
+    assert asr.make_transcriber("mock", "x", None, "de").__class__ is asr.MockTranscriber
+
+
+def test_dialecto():
+    import dialect
+    d = dialect.Dialect({"nöd": "nicht", "öppis": "etwas"})
+    assert d.apply("Das isch nöd öppis Neues. Nöd jetzt.") == "Das isch nicht etwas Neues. Nicht jetzt."
+    assert d.apply("nödig") == "nödig"                                     # solo palabras enteras
+    assert dialect.Dialect().apply("nöd") == "nöd"
+    assert len(dialect.Dialect.load()) == 0                                # la lista empieza vacía
+
+
+def test_sugerir_dialecto():
+    import evaluate
+    pares = [("Das ist nicht gut.", "Das ist nöd gut."), ("Ich weiss es nicht.", "Ich weiss es nöd."),
+             ("Er hat etwas gesagt.", "Er hat öppis gesagt.")]
+    c = evaluate.dialect_candidates(pares)
+    assert c == [("nöd", "nicht", 2)], c
+
+
+def test_protocolo():
+    import protocol as P
+    m = P.final(7, "Gott liebt uns.")
+    assert m == {"v": 1, "type": "final", "seq": 7, "text": "Gott liebt uns."}
+    t = P.translation(7, {"es": "Dios nos ama."}, 0.4321)
+    assert t["seq"] == 7 and t["ms"] == 432 and t["tr"]["es"] == "Dios nos ama."
+    assert P.parse("no es json") is None and P.parse("[1,2]") is None
+    assert P.parse('{"type":"flush"}') == {"type": "flush"}
 
 
 if __name__ == "__main__":

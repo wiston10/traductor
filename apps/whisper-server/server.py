@@ -1,24 +1,30 @@
 #!/usr/bin/env python3
 """
-Servidor local de reconocimiento de voz para suizo alemán.
+Servidor local: reconocimiento de voz (Whisper) + traducción (NLLB) en este ordenador.
 
-Recibe audio PCM 16 kHz (int16, mono) desde la página web por WebSocket,
-lo transcribe con un modelo Whisper ajustado para suizo alemán (que escribe
-en alemán estándar) y devuelve texto provisional ("partial") y definitivo
-("final"). La traducción la sigue haciendo el navegador.
+Recibe audio PCM 16 kHz (int16, mono) desde la página web por WebSocket, lo transcribe
+con Whisper (por defecto el modelo ajustado a suizo alemán, que escribe en alemán estándar)
+y, si está activada, traduce cada frase a los idiomas que pide la página.
 
 Todo corre en este ordenador: gratis, sin claves y sin enviar audio a nadie.
 
+Módulos:
+  segmenter.py  corte del audio en frases (+ puerta de volumen)
+  asr.py        motores Whisper (torch, mlx, simulado) y filtros del texto
+  translate.py  traducción NLLB, glosario y frases fijas
+  dialect.py    palabras de dialecto → alemán estándar (lista revisada a mano)
+  net.py        qué páginas pueden conectarse
+  protocol.py   formato de los mensajes (versión y número de secuencia)
+
 Uso:
     python3 server.py                       # http://localhost:8765
-    python3 server.py --model <modelo HF>   # otro modelo
+    python3 server.py --engine mock         # sin modelo (pruebas)
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
 import json
-import re
 import logging
 import time
 from pathlib import Path
@@ -26,406 +32,166 @@ from pathlib import Path
 import numpy as np
 from aiohttp import WSMsgType, web
 
+import protocol as P
 import training_store as store
+from asr import (DEFAULT_MODEL, MLX_SWISS_PATH, Transcriber, echoes_prompt, is_hallucination,  # noqa: F401
+                 looks_broken, looks_like_list, make_transcriber, resolve_mlx_model, should_drop,
+                 strip_prompt)
+from dialect import Dialect
 from idea import IdeaClient
 from metrics import Metrics
+from net import origin_allowed
+from segmenter import FRAME, SAMPLE_RATE, Segmenter  # noqa: F401
+from translate import TranslationService, clean_targets, load_backend, short_code
 
-SAMPLE_RATE = 16000
-FRAME = 480  # 30 ms
-
+HERE = Path(__file__).resolve().parent
 log = logging.getLogger("whisper-server")
 
 
 # ---------------------------------------------------------------------------
-# Modelo
+# Una conexión de la página (el operador / intérprete que envía audio)
 # ---------------------------------------------------------------------------
-DEFAULT_MODEL = "Flurin17/whisper-large-v3-turbo-swiss-german"
-HERE = Path(__file__).resolve().parent
-# Dónde deja tools/convert_to_mlx.sh el modelo suizo convertido a MLX
-MLX_SWISS_PATH = HERE / "models" / "swiss-german-turbo-mlx"
-MLX_ALIASES = {"turbo": "mlx-community/whisper-large-v3-turbo"}
+class Session:
+    def __init__(self, app: web.Application, ws: web.WebSocketResponse):
+        args = app["args"]
+        self.app, self.ws, self.args = app, ws, args
+        self.transcriber = app["transcriber"]
+        self.translator: TranslationService | None = app["translator"]
+        self.dialect: Dialect = app["dialect"]
+        self.metrics: Metrics = app["metrics"]
+        self.seg = Segmenter(args.partial_every, args.silence, args.max_seg, args.gate_db)
+        self.closed = asyncio.Event()
+        self.recorder: store.Recorder | None = None   # solo si la página activa «Guardar para entrenamiento»
+        self.src = short_code(args.language)
+        self.targets: list[str] = []
+        self.seq = 0
+        self.previous = ""                            # última frase (contexto para Whisper)
+        self.tr_queue: asyncio.Queue[tuple[int, str]] = asyncio.Queue()
+        self.tr_pending = 0                           # traducciones encargadas y aún sin enviar
 
+    # --- envío ---
+    async def send(self, msg: dict) -> None:
+        if not self.ws.closed:
+            await self.ws.send_str(json.dumps(msg, ensure_ascii=False))
 
-class Transcriber:
-    """Motor PyTorch (transformers). Funciona en cualquier sitio; en Mac es el más lento."""
+    async def status(self, text: str, level: str | None = None) -> None:
+        await self.send(P.status(text, level))
 
-    def __init__(self, model_id: str, device: str | None, language: str, vocab: str = ""):
-        import torch
-        from transformers import pipeline
+    # --- configuración que manda la página ---
+    async def configure(self, data: dict) -> None:
+        if data.get("save") and self.recorder is None:
+            self.recorder = store.Recorder(self.app["data_dir"])
+            log.info("Guardando frases para entrenamiento en %s", self.app["data_dir"])
+        elif not data.get("save"):
+            self.recorder = None
+        if data.get("src"):
+            # El idioma que transcribe el modelo manda; la página solo puede afinarlo (de-CH → de)
+            page_src = short_code(str(data["src"]))
+            if page_src != short_code(self.args.language):
+                log.warning("La página dice idioma «%s» pero Whisper transcribe «%s»: se traduce desde «%s»",
+                            page_src, self.args.language, short_code(self.args.language))
+        self.targets = clean_targets(data.get("targets", []), self.src) if self.translator else []
+        await self.send(P.config_ok(self.targets, self.translator.name if self.translator else None))
 
-        if device is None:
-            if torch.backends.mps.is_available():
-                device = "mps"
-            elif torch.cuda.is_available():
-                device = "cuda"
-            else:
-                device = "cpu"
-        dtype = torch.float16 if device in ("mps", "cuda") else torch.float32
-        log.info("Cargando %s en %s (%s)… la primera vez se descarga (~1,6 GB)", model_id, device, dtype)
-        self.pipe = pipeline(
-            "automatic-speech-recognition",
-            model=model_id,
-            torch_dtype=dtype,
-            device=device,
-        )
-        self.language = language
-        self.lock = asyncio.Lock()
-        # Vocabulario opcional: Whisper lo usa como "contexto previo" y reconoce
-        # mejor esos nombres. Máximo ~200 tokens (límite de Whisper).
-        self.prompt_text = ""
-        self.prompt_ids = None
-        if vocab:
+    # --- guardar para entrenamiento ---
+    async def keep(self, audio: np.ndarray, text: str) -> None:
+        if self.recorder is None:
+            return
+        try:
+            await asyncio.to_thread(self.recorder.save, audio, text)
+            await self.send(P.saved(self.recorder.count, self.recorder.seconds,
+                                    self.recorder.dir.name if self.recorder.dir else ""))
+        except Exception:  # noqa: BLE001
+            log.exception("No se pudo guardar la frase para entrenamiento")
+
+    # --- una frase definitiva ---
+    async def publish_final(self, audio: np.ndarray, raw: str) -> None:
+        text = self.dialect.apply(raw) if self.src == "de" else raw
+        self.seq += 1
+        self.previous = text
+        await self.send(P.final(self.seq, text))
+        await self.keep(audio, raw)       # se guarda lo que oyó Whisper, sin retoques
+        if self.targets and self.translator:
+            self.tr_pending += 1
+            self.tr_queue.put_nowait((self.seq, text))
+
+    async def translation_worker(self) -> None:
+        """Traduce en orden, en su propio hilo: la transcripción nunca espera por esto."""
+        while True:
+            seq, text = await self.tr_queue.get()
             try:
-                ids = self.pipe.tokenizer.get_prompt_ids(vocab, return_tensors="pt")
-                if len(ids) > 220:
-                    log.warning("Vocabulario demasiado largo (%d tokens): se recorta a 220", len(ids))
-                    ids = ids[:220]
-                self.prompt_ids = ids.to(self.pipe.device)
-                self.prompt_text = vocab.strip()
-                self._run(np.zeros(SAMPLE_RATE, dtype=np.float32))   # comprobar que funciona
-                log.info("Vocabulario activo (%d tokens)", len(ids))
+                await self._translate_one(seq, text)
+            finally:
+                self.tr_pending -= 1
+
+    async def _translate_one(self, seq: int, text: str) -> None:
+        targets = list(self.targets)
+        if not targets or self.ws.closed:
+            return
+        try:
+            result, took = await self.translator.translate(text, self.src, targets)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Error al traducir")
+            self.metrics.log("translate", ms=0, result="error", error=str(exc)[:120])
+            await self.send(P.translation(seq, {}, 0, error=str(exc)[:200]))
+            return
+        self.metrics.log("translate", ms=round(took * 1000), langs=len(targets), chars=len(text),
+                         queue=self.tr_queue.qsize())
+        await self.send(P.translation(seq, result, took))
+
+    # --- bucle de corte y transcripción ---
+    async def worker(self) -> None:
+        await self.status("Escuchando (Whisper local)")
+        seg, tr = self.seg, self.transcriber
+        while not self.closed.is_set():
+            await asyncio.sleep(0.15)
+            kind, audio = seg.decide(time.monotonic())
+            if kind is None:
+                continue
+            # Si el modelo está ocupado, un parcial se salta; un final espera.
+            if kind == "partial" and tr.lock.locked():
+                continue
+            t0 = time.monotonic()
+            try:
+                text = await tr.transcribe(audio, final=(kind == "final"), previous=self.previous)
             except Exception as exc:  # noqa: BLE001
-                self.prompt_ids, self.prompt_text = None, ""
-                log.warning("No se pudo activar el vocabulario (%s): se sigue sin él", exc)
-        # Calentamiento: la primera inferencia siempre es lenta
-        self._run(np.zeros(SAMPLE_RATE, dtype=np.float32))
-        t0 = time.monotonic()
-        self._run(np.zeros(5 * SAMPLE_RATE, dtype=np.float32))
-        log.info("Modelo listo en %s. Un paso tarda ~%.2fs (ideal: menos de 1s).", device, time.monotonic() - t0)
+                log.exception("Error al transcribir")
+                await self.status(f"Error: {exc}")
+                continue
+            took = time.monotonic() - t0
+            seg.note_cost(took)
+            self.metrics.whisper_step(kind, len(audio) / SAMPLE_RATE, took)
+            log.debug("%s %.1fs audio en %.2fs: %s", kind, len(audio) / SAMPLE_RATE, took, text)
+            if should_drop(text, tr.prompt_text):
+                if kind == "final":
+                    await self.send(P.partial(""))
+                continue
+            if kind == "final":
+                await self.publish_final(audio, text)
+            elif text != seg.last_partial_text:
+                seg.last_partial_text = text
+                await self.send(P.partial(text))
+            # Aviso solo si el Mac va lento de forma sostenida
+            if seg.step_cost > 2.5:
+                await self.status(f"Whisper va lento ({seg.step_cost:.1f}s por paso)", "warn")
+            elif kind == "final":
+                await self.status(f"Escuchando · {seg.step_cost:.1f}s por paso", "live")
 
-    def _run(self, audio: np.ndarray) -> str:
-        kwargs = {
-            "language": self.language,
-            "task": "transcribe",
-            "num_beams": 1,          # búsqueda simple: mucho más rápida
-            "do_sample": False,
-            "max_new_tokens": 160,   # una frase de pocos segundos no necesita más
-        }
-        if self.prompt_ids is not None:
-            kwargs["prompt_ids"] = self.prompt_ids
-        out = self.pipe({"raw": audio, "sampling_rate": SAMPLE_RATE}, generate_kwargs=kwargs)
-        return strip_prompt((out.get("text") or "").strip(), self.prompt_text)
-
-    async def transcribe(self, audio: np.ndarray) -> str:
-        async with self.lock:  # un solo modelo: una inferencia a la vez
-            return await asyncio.to_thread(self._run, audio)
-
-
-def resolve_mlx_model(model: str) -> str:
-    """Qué modelo MLX cargar. El suizo hay que convertirlo antes (tools/convert_to_mlx.sh)."""
-    if model in MLX_ALIASES:
-        return MLX_ALIASES[model]
-    if model == DEFAULT_MODEL:
-        if (MLX_SWISS_PATH / "config.json").exists():
-            return str(MLX_SWISS_PATH)
-        raise SystemExit(
-            "El modelo suizo todavía no está convertido a MLX.\n"
-            "  Conviértelo (una vez):   bash tools/convert_to_mlx.sh\n"
-            "  o prueba el turbo normal: python3 server.py --engine mlx --model turbo")
-    return model
-
-
-class MlxTranscriber:
-    """
-    Motor MLX (mlx-whisper): el sistema de Apple para sus chips. En las comparativas
-    publicadas, varias veces más rápido que PyTorch en Mac con el mismo modelo.
-    Todas las llamadas van por UN hilo propio: MLX no admite mezclar hilos.
-    """
-
-    def __init__(self, model: str, language: str, vocab: str = "", audio_ctx: str = "full"):
-        from concurrent.futures import ThreadPoolExecutor
-        try:
-            import mlx_whisper  # noqa: F401
-        except ImportError:
-            raise SystemExit("Falta mlx-whisper. Instálalo:  .venv/bin/pip install -r requirements-mlx.txt")
-        self.model = resolve_mlx_model(model)
-        self.language = language
-        self.prompt_text = " ".join(vocab.split()) if vocab else ""
-        self.lock = asyncio.Lock()
-        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx")
-        # «auto»: el codificador de Whisper procesa solo la duración real de la frase (+1 s)
-        # en vez de 30 s rellenos de silencio. Mucho menos cálculo; EXPERIMENTAL (comparar textos).
-        self.short = audio_ctx == "auto"
-        self.fallbacks = 0            # frases que hubo que repetir con el contexto completo
-        self._model = None
-        log.info("Cargando %s con MLX%s… la primera vez se descarga", self.model,
-                 " (contexto corto)" if self.short else "")
-        self._call(np.zeros(SAMPLE_RATE, dtype=np.float32))            # carga + calentamiento
-        t0 = time.monotonic()
-        self._call(np.zeros(5 * SAMPLE_RATE, dtype=np.float32))
-        log.info("Modelo listo (MLX). Un paso tarda ~%.2fs (ideal: menos de 1s).", time.monotonic() - t0)
-        if self.prompt_text:
-            log.info("Vocabulario activo")
-
-    def _call(self, audio: np.ndarray) -> str:
-        return self._pool.submit(self._transcribe_blocking, audio).result()
-
-    # Mismo nombre que en el motor PyTorch (lo usa evaluate.py)
-    _run = _call
-
-    def _transcribe_blocking(self, audio: np.ndarray) -> str:
-        if self.short:
-            return self._short_blocking(audio)
-        import mlx_whisper
-        out = mlx_whisper.transcribe(
-            audio.astype(np.float32),
-            path_or_hf_repo=self.model,
-            language=self.language,
-            task="transcribe",
-            temperature=0.0,                    # una sola pasada: sin reintentos (más rápido)
-            condition_on_previous_text=False,   # cada frase es independiente
-            initial_prompt=self.prompt_text or None,
-            verbose=None,
-        )
-        return strip_prompt((out.get("text") or "").strip(), self.prompt_text)
-
-    def _decode_ctx(self, audio: np.ndarray, ctx: int | None, max_tokens: int | None) -> tuple[str, object]:
-        """Codifica el audio con un contexto de «ctx» posiciones (None = los 30 s completos) y decodifica."""
-        import mlx.core as mx
-        import mlx.nn as nn
-        from mlx_whisper.audio import log_mel_spectrogram, pad_or_trim
-        from mlx_whisper.decoding import DecodingOptions, decode
-        from mlx_whisper.load_models import load_model
-
-        if self._model is None:
-            self._model = load_model(self.model, dtype=mx.float16)
-        m = self._model
-        full_ctx = m.dims.n_audio_ctx
-        mel = log_mel_spectrogram(audio.astype(np.float32), n_mels=m.dims.n_mels)
-        if ctx is None:
-            ctx = full_ctx
-        ctx = min(full_ctx, ctx)
-        mel = pad_or_trim(mel, ctx * 2, axis=-2).astype(mx.float16)[None]
-
-        enc = m.encoder                                           # codificador con posiciones recortadas
-        x = nn.gelu(enc.conv1(mel))
-        x = nn.gelu(enc.conv2(x))
-        x = x + enc._positional_embedding[: x.shape[1]]
-        for block in enc.blocks:
-            x, _, _ = block(x)
-        features = enc.ln_post(x)
-
-        m.dims.n_audio_ctx = ctx      # así decode() reconoce las características ya calculadas
-        try:
-            res = decode(m, features, DecodingOptions(
-                language=self.language, task="transcribe", temperature=0.0, sample_len=max_tokens,
-                without_timestamps=True, fp16=True, prompt=self.prompt_text or None))
-        finally:
-            m.dims.n_audio_ctx = full_ctx
-        r = res[0] if isinstance(res, list) else res
-        return strip_prompt((r.text or "").strip(), self.prompt_text), r
-
-    def _short_blocking(self, audio: np.ndarray) -> str:
-        """
-        Contexto corto (como «audio_ctx» de whisper.cpp): procesa la duración real + 1 s en vez de 30 s.
-        Su fallo típico son los bucles («haben wir Sachen, haben wir Sachen…»), así que:
-          - se limita la respuesta a lo que cabe en la duración de la frase, y
-          - si sale repetitiva o demasiado larga, se repite con el contexto completo (más lento, fiable).
-        """
-        secs = len(audio) / SAMPLE_RATE
-        frames = int(secs * SAMPLE_RATE / 160) + 1
-        max_tokens = int(secs * 7) + 12                 # ~4 tokens/s al hablar rápido, con margen
-        text, r = self._decode_ctx(audio, (frames + 1) // 2 + 50, max_tokens)
-        if r.no_speech_prob > 0.6 and r.avg_logprob < -1.0:      # silencio/ruido
-            return ""
-        if looks_broken(text, len(r.tokens), max_tokens):
-            self.fallbacks += 1
-            text, r = self._decode_ctx(audio, None, None)
-            if r.no_speech_prob > 0.6 and r.avg_logprob < -1.0:
-                return ""
-        return text
-
-    async def transcribe(self, audio: np.ndarray) -> str:
-        async with self.lock:
-            loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(self._pool, self._transcribe_blocking, audio)
-
-
-def make_transcriber(engine: str, model: str, device: str | None, language: str, vocab: str = "",
-                     audio_ctx: str = "full"):
-    if engine == "mlx":
-        return MlxTranscriber(model, language, vocab, audio_ctx)
-    return Transcriber(model, device, language, vocab)
-
-
-# ---------------------------------------------------------------------------
-# Segmentación del audio en directo
-# ---------------------------------------------------------------------------
-# Frases típicas que Whisper "alucina" sobre silencio o música
-HALLUCINATIONS = {
-    "untertitel im auftrag des zdf",
-    "untertitel der amara.org-community",
-    "vielen dank fürs zuschauen",
-    "danke fürs zuschauen",
-    "copyright wdr",
-    "swr 2020",
-}
-
-
-def looks_broken(text: str, n_tokens: int = 0, max_tokens: int = 0) -> bool:
-    """¿La transcripción está en bucle o es anormalmente larga? (fallo típico del contexto corto)"""
-    import zlib
-    t = text.strip()
-    if not t:
-        return False
-    if max_tokens and n_tokens >= max_tokens:               # agotó el límite: casi seguro un bucle
-        return True
-    words = re.findall(r"\w+", t.lower())
-    if len(words) >= 6:
-        trigrams = [tuple(words[i:i + 3]) for i in range(len(words) - 2)]
-        if max(trigrams.count(g) for g in set(trigrams)) >= 3:   # la misma secuencia 3 veces o más
-            return True
-        bigrams = [tuple(words[i:i + 2]) for i in range(len(words) - 1)]
-        if max(bigrams.count(g) for g in set(bigrams)) >= 3:     # «ein Säge ein Säge ein Säge»
-            return True
-    data = t.encode("utf-8")
-    return len(data) > 60 and len(data) / len(zlib.compress(data)) > 2.2   # texto muy repetitivo
-
-
-def strip_prompt(text: str, prompt: str) -> str:
-    """Algunas versiones de transformers devuelven el vocabulario delante del texto: se quita."""
-    if prompt and text.startswith(prompt):
-        return text[len(prompt):].strip()
-    return text
-
-
-def echoes_prompt(text: str, prompt: str) -> bool:
-    """Con silencio, Whisper a veces "lee" el vocabulario en vez de escuchar: se descarta."""
-    if not prompt:
-        return False
-    words = [w.strip(".,;:!?").lower() for w in text.split()]
-    vocab = {w.strip(".,;:!?").lower() for w in prompt.split()}
-    return len(words) >= 3 and sum(w in vocab for w in words) / len(words) > 0.8
-
-
-def is_hallucination(text: str) -> bool:
-    t = text.lower().strip(" .!?…")
-    return not t or any(h in t for h in HALLUCINATIONS)
-
-
-class Segmenter:
-    """
-    Acumula audio y decide cuándo transcribir:
-      - cada `partial_every` s: texto provisional del segmento actual
-      - tras `silence` s de pausa: cierra la frase (texto definitivo)
-      - si nadie hace pausa (predicador rápido): corta como máximo a `max_seg` s,
-        en el punto más silencioso de los últimos segundos, para no partir palabras.
-    """
-
-    def __init__(self, partial_every: float, silence: float, max_seg: float):
-        self.partial_every = partial_every
-        self.silence = silence
-        self.max_seg = max_seg
-        self.buf = np.zeros(0, dtype=np.float32)
-        self.noise = 0.004       # nivel de ruido de fondo (se adapta)
-        self.last_partial = 0.0
-        self.last_partial_text = ""
-        self.last_partial_len = 0
-        self.step_cost = 0.0     # cuánto tardó el último paso (s)
-
-    def note_cost(self, seconds: float) -> None:
-        # media móvil del tiempo de inferencia
-        self.step_cost = seconds if self.step_cost == 0 else 0.7 * self.step_cost + 0.3 * seconds
-
-    def add(self, pcm: bytes) -> None:
-        samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
-        self.buf = np.concatenate([self.buf, samples])
-
-    @property
-    def seconds(self) -> float:
-        return len(self.buf) / SAMPLE_RATE
-
-    def _frame_rms(self) -> np.ndarray:
-        n = len(self.buf) // FRAME
-        if n == 0:
-            return np.zeros(0)
-        frames = self.buf[: n * FRAME].reshape(n, FRAME)
-        return np.sqrt((frames ** 2).mean(axis=1) + 1e-12)
-
-    def decide(self, now: float):
-        """Devuelve ("final", audio) | ("partial", audio) | (None, None)."""
-        rms = self._frame_rms()
-        if len(rms) == 0:
-            return None, None
-        # Ruido de fondo adaptativo: percentil bajo de la energía reciente
-        self.noise = 0.95 * self.noise + 0.05 * float(np.percentile(rms[-100:], 10))
-        # Suelo bajo: el audio de una pestaña con el volumen del vídeo bajado llega flojo
-        threshold = max(0.003, self.noise * 3.0)
-        speech = rms > threshold
-
-        if not speech.any():
-            # Solo silencio: no acumular indefinidamente
-            if self.seconds > 2.0:
-                self.buf = self.buf[-int(0.3 * SAMPLE_RATE):]
-            return None, None
-
-        # Silencio al final
-        trailing = 0
-        for v in speech[::-1]:
-            if v:
+    async def flush(self) -> None:
+        audio = self.seg.flush()
+        if audio is not None:
+            try:
+                text = await self.transcriber.transcribe(audio, final=True, previous=self.previous)
+                if not should_drop(text, self.transcriber.prompt_text):
+                    await self.publish_final(audio, text)
+            except Exception:  # noqa: BLE001
+                log.exception("Error al transcribir lo pendiente")
+        # Esperar (poco) a que salgan las traducciones pendientes
+        for _ in range(80):
+            if self.tr_pending <= 0:
                 break
-            trailing += 1
-        trailing_s = trailing * FRAME / SAMPLE_RATE
-
-        if trailing_s >= self.silence:
-            audio = self._cut(len(self.buf))
-            # Menos de 0,25 s de voz (tos, golpe, ruido): Whisper solo "inventaría" texto
-            if speech.sum() * FRAME / SAMPLE_RATE < 0.25:
-                return None, None
-            return "final", audio
-
-        if self.seconds >= self.max_seg:
-            # Cortar en el marco más silencioso de los últimos 2 s
-            window = int(2.0 * SAMPLE_RATE / FRAME)
-            start = max(0, len(rms) - window)
-            cut_frame = start + int(np.argmin(rms[start:]))
-            return "final", self._cut(max(cut_frame, 1) * FRAME)
-
-        # Intervalo adaptativo: nunca pedir parciales más rápido de lo que el Mac
-        # puede procesarlos (deja hueco para que los finales no esperen).
-        if self.partial_every <= 0:          # texto provisional desactivado: solo frases definitivas
-            return None, None
-        # Si ya empieza una pausa, la frase definitiva es inminente: un paso provisional
-        # ahora solo la retrasaría (el modelo hace una cosa a la vez).
-        if trailing_s >= 0.2:
-            return None, None
-        interval = max(self.partial_every, self.step_cost * 1.5)
-        grown = len(self.buf) - self.last_partial_len >= int(0.4 * SAMPLE_RATE)
-        if now - self.last_partial >= interval and self.seconds >= 0.6 and grown:
-            self.last_partial = now
-            self.last_partial_len = len(self.buf)
-            return "partial", self.buf.copy()
-
-        return None, None
-
-    def flush(self) -> np.ndarray | None:
-        """Entrega todo lo pendiente (si tiene algo de voz) y vacía el búfer."""
-        rms = self._frame_rms()
-        has_speech = len(rms) and (rms > max(0.003, self.noise * 3.0)).sum() * FRAME / SAMPLE_RATE >= 0.25
-        audio = self._cut(len(self.buf))
-        return audio if has_speech else None
-
-    def _cut(self, n: int) -> np.ndarray:
-        audio, self.buf = self.buf[:n], self.buf[n:]
-        self.last_partial = 0.0
-        self.last_partial_len = 0
-        self.last_partial_text = ""
-        return audio
-
-
-# ---------------------------------------------------------------------------
-# Servidor web + WebSocket
-# ---------------------------------------------------------------------------
-def origin_allowed(origin: str | None, extra: list[str]) -> bool:
-    if not origin or origin == "null":          # archivo abierto con doble clic
-        return True
-    if origin in extra:
-        return True
-    try:
-        from urllib.parse import urlparse
-        return urlparse(origin).hostname in {"localhost", "127.0.0.1", "::1"}
-    except ValueError:
-        return False
+            await asyncio.sleep(0.1)
+        await self.send(P.flushed())
 
 
 async def ws_handler(request: web.Request) -> web.WebSocketResponse:
@@ -433,113 +199,39 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
     if not origin_allowed(request.headers.get("Origin"), app["args"].allow_origin):
         log.warning("Conexión rechazada desde %s", request.headers.get("Origin"))
         raise web.HTTPForbidden(text="Origen no permitido")
-    transcriber: Transcriber = app["transcriber"]
-    args = app["args"]
-    ws = web.WebSocketResponse(max_msg_size=4 * 1024 * 1024)
+    ws = web.WebSocketResponse(max_msg_size=4 * 1024 * 1024, heartbeat=20)
     await ws.prepare(request)
     log.info("Cliente conectado")
-
-    seg = Segmenter(args.partial_every, args.silence, args.max_seg)
-    closed = asyncio.Event()
-    recorder: store.Recorder | None = None     # solo si la página activa «Guardar para entrenamiento»
-
-    async def keep(audio: np.ndarray, text: str) -> None:
-        """Guarda la frase (audio + texto) si está activado el modo entrenamiento."""
-        if recorder is None:
-            return
-        try:
-            await asyncio.to_thread(recorder.save, audio, text)
-            if not ws.closed:
-                await ws.send_str(json.dumps({"type": "saved", "count": recorder.count,
-                                              "minutes": round(recorder.seconds / 60, 1),
-                                              "session": recorder.dir.name if recorder.dir else ""}))
-        except Exception:  # noqa: BLE001
-            log.exception("No se pudo guardar la frase para entrenamiento")
-
-    async def send(kind: str, text: str, level: str | None = None) -> None:
-        if not ws.closed:
-            msg = {"type": kind, "text": text}
-            if level:
-                msg["level"] = level
-            await ws.send_str(json.dumps(msg, ensure_ascii=False))
-
-    async def worker() -> None:
-        await send("status", "Escuchando (Whisper local)")
-        while not closed.is_set():
-            await asyncio.sleep(0.15)
-            kind, audio = seg.decide(time.monotonic())
-            if kind is None:
-                continue
-            # Si el modelo está ocupado, un parcial se salta; un final espera.
-            if kind == "partial" and transcriber.lock.locked():
-                continue
-            t0 = time.monotonic()
-            try:
-                text = await transcriber.transcribe(audio)
-            except Exception as exc:  # noqa: BLE001
-                log.exception("Error al transcribir")
-                await send("status", f"Error: {exc}")
-                continue
-            took = time.monotonic() - t0
-            seg.note_cost(took)
-            app["metrics"].whisper_step(kind, len(audio) / SAMPLE_RATE, took)
-            log.debug("%s %.1fs audio en %.2fs: %s", kind, len(audio) / SAMPLE_RATE, took, text)
-            if is_hallucination(text) or echoes_prompt(text, transcriber.prompt_text):
-                if kind == "final":
-                    await send("partial", "")
-                continue
-            if kind == "final":
-                await send("final", text)
-                await keep(audio, text)
-            elif text != seg.last_partial_text:
-                seg.last_partial_text = text
-                await send("partial", text)
-            # Aviso solo si el Mac va lento de forma sostenida
-            if seg.step_cost > 2.5:
-                await send("status", f"Whisper va lento ({seg.step_cost:.1f}s por paso)", "warn")
-            elif kind == "final":
-                await send("status", f"Escuchando · {seg.step_cost:.1f}s por paso", "live")
-
-    async def flush() -> None:
-        audio = seg.flush()
-        if audio is not None:
-            try:
-                text = await transcriber.transcribe(audio)
-                if not is_hallucination(text) and not echoes_prompt(text, transcriber.prompt_text):
-                    await send("final", text)
-                    await keep(audio, text)
-            except Exception:  # noqa: BLE001
-                log.exception("Error al transcribir lo pendiente")
-        await send("flushed", "")
-
-    task = asyncio.create_task(worker())
+    s = Session(app, ws)
+    tasks = [asyncio.create_task(s.worker())]
+    if s.translator:
+        tasks.append(asyncio.create_task(s.translation_worker()))
     try:
         async for msg in ws:
             if msg.type == WSMsgType.BINARY:
-                seg.add(msg.data)
+                s.seg.add(msg.data)
             elif msg.type == WSMsgType.TEXT:
-                try:
-                    data = json.loads(msg.data)
-                except ValueError:
+                data = P.parse(msg.data)
+                if data is None:
                     continue
                 if data.get("type") == "config":
-                    if data.get("save") and recorder is None:
-                        recorder = store.Recorder(app["data_dir"])
-                        log.info("Guardando frases para entrenamiento en %s", app["data_dir"])
-                    elif not data.get("save"):
-                        recorder = None
+                    await s.configure(data)
                 elif data.get("type") == "flush":
-                    closed.set()          # el trabajador deja de cortar mientras vaciamos
-                    await flush()
+                    s.closed.set()          # el trabajador deja de cortar mientras vaciamos
+                    await s.flush()
             elif msg.type == WSMsgType.ERROR:
                 break
     finally:
-        closed.set()
-        task.cancel()
+        s.closed.set()
+        for t in tasks:
+            t.cancel()
         log.info("Cliente desconectado")
     return ws
 
 
+# ---------------------------------------------------------------------------
+# API de la herramienta de corrección y del modo idea
+# ---------------------------------------------------------------------------
 def _check_origin(request: web.Request) -> None:
     if not origin_allowed(request.headers.get("Origin"), request.app["args"].allow_origin):
         raise web.HTTPForbidden(text="Origen no permitido")
@@ -653,17 +345,20 @@ async def index(request: web.Request) -> web.StreamResponse:
     return web.Response(text="Servidor Whisper activo. Abre la página web del apuntador.")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Servidor Whisper local para suizo alemán")
-    parser.add_argument("--engine", choices=("torch", "mlx"), default="torch",
-                        help="Motor: torch (actual) o mlx (Apple, mucho más rápido en Mac; ver README)")
+# ---------------------------------------------------------------------------
+# Arranque
+# ---------------------------------------------------------------------------
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Servidor local: Whisper + traducción NLLB")
+    parser.add_argument("--engine", choices=("torch", "mlx", "mock"), default="torch",
+                        help="Motor: torch (por defecto), mlx (Apple, opcional) o mock (simulado, para pruebas)")
     parser.add_argument("--audio-ctx", choices=("full", "auto"), default="full",
-                        help="Solo MLX. auto = procesar solo la duración real de cada frase (mucho más rápido, "
-                             "experimental: comprobar con bench_asr.py que acierta igual)")
+                        help="Solo MLX. auto = procesar solo la duración real de cada frase (experimental)")
     parser.add_argument("--model", default=DEFAULT_MODEL,
                         help="Modelo (por defecto: Whisper turbo ajustado a suizo alemán). "
-                             "Con --engine mlx también: «turbo» (Whisper turbo normal, sin conversión)")
-    parser.add_argument("--language", default="de", help="Idioma de salida de Whisper (de = alemán estándar)")
+                             "«turbo» = Whisper turbo general (para prédicas en otros idiomas)")
+    parser.add_argument("--language", default="de",
+                        help="Idioma de la prédica (de = alemán/suizo alemán; con otro idioma usa --model turbo)")
     parser.add_argument("--device", default=None, help="mps | cuda | cpu (por defecto, el mejor disponible)")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
@@ -671,29 +366,96 @@ def main() -> None:
                         help="Segundos entre textos provisionales. Por defecto 0 = desactivado: solo frases "
                              "definitivas. Medido en un MacBook Air M3: con provisionales, 1 min de voz pedía "
                              "~78 s de cálculo y se quedaba atrás; sin ellos, ~30 s. Activar en Mac potentes: 1.0")
-    parser.add_argument("--silence", type=float, default=0.5,
-                        help="Pausa (s) que cierra una frase")
+    parser.add_argument("--silence", type=float, default=0.5, help="Pausa (s) que cierra una frase")
     parser.add_argument("--max-seg", type=float, default=6.0,
                         help="Duración máxima (s) de un segmento si el predicador no hace pausas")
-    parser.add_argument("--vocab", nargs="?", const=str(Path(__file__).resolve().parent / "vocab" / "de.txt"),
+    parser.add_argument("--gate-db", type=float, default=-50.0,
+                        help="Puerta de volumen (dBFS): frases más flojas no se mandan al modelo. "
+                             "-50 solo quita casi-silencio; usa -200 para desactivarla")
+    parser.add_argument("--beam", type=int, default=1,
+                        help="Búsqueda amplia en frases definitivas (1 = la más rápida). Medir con evaluate.py")
+    parser.add_argument("--context", choices=("none", "confirmed"), default="none",
+                        help="confirmed = dar a Whisper el final de la frase anterior como contexto. "
+                             "Medir con evaluate.py antes de usarlo")
+    parser.add_argument("--vocab", nargs="?", const=str(HERE / "vocab" / "de.txt"),
                         default="", metavar="ARCHIVO",
-                        help="Activar vocabulario bíblico para Whisper (por defecto vocab/de.txt)")
-    parser.add_argument("--data-dir", default=str(Path(__file__).resolve().parent / "training-data"),
+                        help="Vocabulario bíblico para Whisper. APAGADO por defecto: una lista con comas puede "
+                             "hacer que Whisper invente listas de palabras. Medir con evaluate.py --vocab")
+    parser.add_argument("--translate", choices=("auto", "ct2", "transformers", "off", "fake"), default="auto",
+                        help="Traducción NLLB en el servidor. auto = si está instalada (bash tools/setup_nllb.sh)")
+    parser.add_argument("--mt-beams", type=int, default=2, help="Búsqueda de la traducción (1 = más rápida)")
+    parser.add_argument("--mt-threads", type=int, default=4, help="Núcleos del procesador para traducir")
+    parser.add_argument("--data-dir", default=str(HERE / "training-data"),
                         help="Carpeta donde se guardan las frases para entrenamiento")
     parser.add_argument("--idea-model", default="gemma3:4b",
                         help="Modelo de Ollama SIN razonamiento para el modo idea (por defecto gemma3:4b)")
     parser.add_argument("--idea-input", choices=("ambos", "literal"), default="literal",
-                        help="Qué recibe el modelo: solo la traducción literal (por defecto: más fiel en las "
-                             "pruebas con gemma3:4b) u original + traducción literal")
+                        help="Qué recibe el modelo: solo la traducción literal (por defecto) u original + literal")
     parser.add_argument("--idea-pause", type=float, default=2.0, metavar="SEG",
-                        help="Pausar el modo idea mientras Whisper tarde más de SEG por paso (protege la transcripción)")
-    parser.add_argument("--no-metrics", action="store_true",
-                        help="No guardar el registro de rendimiento en metrics/")
+                        help="Pausar el modo idea mientras Whisper tarde más de SEG por paso")
+    parser.add_argument("--no-metrics", action="store_true", help="No guardar el registro de rendimiento")
     parser.add_argument("--allow-origin", action="append", default=[],
                         help="Permitir otra web (p. ej. https://usuario.github.io). Repetible.")
     parser.add_argument("--verbose", action="store_true")
-    args = parser.parse_args()
+    return parser
 
+
+def build_app(args: argparse.Namespace, transcriber=None, translator: TranslationService | None = None,
+              metrics_dir: Path | None = None) -> web.Application:
+    """Crea la aplicación. Las pruebas pasan su propio motor y traductor (sin modelos)."""
+    app = web.Application()
+    app["args"] = args
+    app["web_dir"] = HERE.parent / "web"
+    if transcriber is None:
+        vocab = ""
+        if args.vocab:
+            vp = Path(args.vocab)
+            if vp.exists():
+                vocab = " ".join(vp.read_text(encoding="utf-8").split())
+            else:
+                log.warning("No existe el vocabulario %s: se sigue sin él", vp)
+        transcriber = make_transcriber(args.engine, args.model, args.device, args.language, vocab,
+                                       args.audio_ctx, args.beam, args.context)
+    app["transcriber"] = transcriber
+    if translator is None:
+        backend = load_backend(args.translate, beams=args.mt_beams, threads=args.mt_threads)
+        translator = TranslationService(backend) if backend else None
+    app["translator"] = translator
+    app["dialect"] = Dialect.load()
+    if len(app["dialect"]):
+        log.info("Dialecto: %d palabras revisadas → alemán estándar", len(app["dialect"]))
+    app["data_dir"] = Path(args.data_dir)
+    app["idea"] = IdeaClient(args.idea_model, input_mode=args.idea_input)
+    app["metrics"] = Metrics(metrics_dir or HERE / "metrics", enabled=not args.no_metrics)
+    app["metrics"].log("start", model=args.model, engine=args.engine, audio_ctx=args.audio_ctx,
+                       idea_model=args.idea_model, idea_input=args.idea_input, max_seg=args.max_seg,
+                       partial_every=args.partial_every, vocab=bool(args.vocab), beam=args.beam,
+                       context=args.context, gate_db=args.gate_db,
+                       translate=translator.name if translator else "off")
+
+    app.router.add_get("/", index)
+    app.router.add_get("/ws", ws_handler)
+    app.router.add_get("/corregir", corregir)
+    app.router.add_get("/api/idea/status", api_idea_status)
+    app.router.add_post("/api/idea", api_idea)
+    app.router.add_get("/api/sessions", api_sessions)
+    app.router.add_get("/api/sessions/{sid}", api_session)
+    app.router.add_post("/api/sessions/{sid}", api_session_meta)
+    app.router.add_post("/api/sessions/{sid}/segments/{seg}", api_update_segment)
+    app.router.add_get("/api/audio/{sid}/{seg}", api_audio)
+    if app["web_dir"].is_dir():
+        app.router.add_static("/static", app["web_dir"], show_index=False)
+    if (app["web_dir"] / "glossary").is_dir():
+        app.router.add_static("/glossary", app["web_dir"] / "glossary", show_index=False)
+
+    async def _close_idea(app_: web.Application) -> None:
+        await app_["idea"].close()
+    app.on_cleanup.append(_close_idea)
+    return app
+
+
+def main() -> None:
+    args = build_parser().parse_args()
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
     # Silenciar mensajes técnicos que no son errores (descargas, avisos de transformers)
@@ -704,42 +466,9 @@ def main() -> None:
         hf_logging.set_verbosity_error()
     except Exception:  # noqa: BLE001
         pass
-
-    app = web.Application()
-    app["args"] = args
-    app["web_dir"] = (Path(__file__).resolve().parent.parent / "web")
-    vocab = ""
-    if args.vocab:
-        vp = Path(args.vocab)
-        if vp.exists():
-            vocab = " ".join(vp.read_text(encoding="utf-8").split())
-        else:
-            log.warning("No existe el vocabulario %s: se sigue sin él", vp)
-    app["transcriber"] = make_transcriber(args.engine, args.model, args.device, args.language, vocab,
-                                          args.audio_ctx)
-    app.router.add_get("/", index)
-    app.router.add_get("/ws", ws_handler)
-    app["data_dir"] = Path(args.data_dir)
-    app.router.add_get("/corregir", corregir)
-    app["idea"] = IdeaClient(args.idea_model, input_mode=args.idea_input)
-    app["metrics"] = Metrics(Path(__file__).resolve().parent / "metrics", enabled=not args.no_metrics)
-    app["metrics"].log("start", model=args.model, engine=args.engine, audio_ctx=args.audio_ctx, idea_model=args.idea_model, idea_input=args.idea_input,
-                       max_seg=args.max_seg, partial_every=args.partial_every, vocab=bool(args.vocab))
-    app.router.add_get("/api/idea/status", api_idea_status)
-    app.router.add_post("/api/idea", api_idea)
-
-    async def _close_idea(app_: web.Application) -> None:
-        await app_["idea"].close()
-    app.on_cleanup.append(_close_idea)
-    app.router.add_get("/api/sessions", api_sessions)
-    app.router.add_get("/api/sessions/{sid}", api_session)
-    app.router.add_post("/api/sessions/{sid}", api_session_meta)
-    app.router.add_post("/api/sessions/{sid}/segments/{seg}", api_update_segment)
-    app.router.add_get("/api/audio/{sid}/{seg}", api_audio)
-    app.router.add_static("/static", app["web_dir"], show_index=False)
-    if (app["web_dir"] / "glossary").is_dir():
-        app.router.add_static("/glossary", app["web_dir"] / "glossary", show_index=False)
-
+    app = build_app(args)
+    if app["translator"]:
+        log.info("Traducción en el servidor activa (%s)", app["translator"].name)
     log.info("Abre http://%s:%d en Chrome", "localhost" if args.host == "127.0.0.1" else args.host, args.port)
     web.run_app(app, host=args.host, port=args.port, print=None)
 

@@ -80,3 +80,6 @@ Thumbs.db
 /data/dataset/
 /apps/whisper-server/metrics/
 /data/mlx-examples/
+
+# --- Sugerencias generadas (se revisan a mano antes de usarlas) ---
+/apps/whisper-server/vocab/dialecto-sugerencias.json

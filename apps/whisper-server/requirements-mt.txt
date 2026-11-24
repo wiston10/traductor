@@ -1,0 +1,3 @@
+# Traducción NLLB en el servidor (opcional). Instalar con: bash tools/setup_nllb.sh
+ctranslate2>=4.6
+sentencepiece>=0.2

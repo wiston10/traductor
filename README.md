@@ -3,7 +3,10 @@
 Herramienta gratuita para una organización sin ánimo de lucro. Ayuda a la persona que
 **interpreta en vivo** una prédica: mientras el predicador habla (alemán, suizo alemán,
 francés o inglés), en la pantalla del intérprete aparece lo que se dice y una traducción
-automática al español, a un ritmo que se puede leer. El intérprete lee, corrige y habla.
+automática, a un ritmo que se puede leer. El intérprete lee, corrige y habla.
+
+Hacia dónde va (plan paso a paso en el documento del proyecto): que los oyentes sigan la
+prédica en su móvil en cualquiera de los 15 idiomas más hablados, y más adelante escucharla.
 
 No usa APIs de pago ni claves: el reconocimiento de voz y la traducción corren en el
 navegador o en el propio Mac.
@@ -20,7 +23,7 @@ navegador o en el propio Mac.
  └──────────────────────────┘
             │ texto original
             ▼
- Traductor integrado de Chrome (en el ordenador) + glosario de la iglesia
+ NLLB-200 en el Mac (15 idiomas) o, si no está, el traductor de Chrome + glosario bíblico
             │ texto traducido
             ▼
  Pantalla del intérprete: ritmo de lectura ajustable + línea guía
@@ -32,9 +35,9 @@ navegador o en el propio Mac.
 |---|---|---|
 | `apps/web` | La página del apuntador (un solo `index.html`) | **En uso** |
 | `apps/whisper-server` | Servidor local con Whisper ajustado a suizo alemán; también sirve la página | **En uso** |
-| `apps/mobile` | App de iPhone (Expo, iOS 26) | En pausa — ver su README |
-| `packages/shared` | Tipos e idiomas compartidos de la app móvil | Solo para `apps/mobile` |
-| `tests` | Pruebas de la app móvil | Solo para `apps/mobile` |
+| `tools` | Glosario, conversión de modelos, instalación de NLLB, comprobación de páginas | En uso |
+
+La app de iPhone (Expo) está guardada en la rama `archivo/movil`: se retomará con la fase de oyentes.
 
 ## Puesta en marcha (Mac con chip Apple)
 
@@ -81,14 +84,16 @@ sacar el informe automático de rendimiento (`apps/whisper-server/report.py`).
 ## Pruebas
 
 ```bash
-npm run test:server   # lógica del servidor Whisper (no carga el modelo)
+npm test   # páginas + servidor, sin modelos (también corre en GitHub en cada push)
 ```
+
+Licencias de los modelos (dos son solo para uso no comercial): [`AVISO_LICENCIAS.md`](AVISO_LICENCIAS.md).
 
 ## Privacidad
 
 - Motor **Whisper**: el audio no sale del Mac.
 - Motor **Chrome**: el audio se envía a Google para reconocer la voz.
-- La traducción siempre se hace en el ordenador. No se guarda nada salvo lo que el
+- La traducción siempre se hace en el ordenador (NLLB en el Mac o el traductor de Chrome). No se guarda nada salvo lo que el
   intérprete descargue con el botón **Descargar**.
 
 ## Recomendaciones

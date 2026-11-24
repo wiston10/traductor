@@ -1,0 +1,4 @@
+{
+  "note": "Palabras de dialecto suizo que se cuelan en la transcripción → alemán estándar. Se llena a mano con lo que sugiere `python3 evaluate.py --sugerir-dialecto` (sale de TUS correcciones). Solo entra lo que una persona haya revisado.",
+  "mappings": {}
+}

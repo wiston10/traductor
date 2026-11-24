@@ -266,6 +266,8 @@
     recog: null,
     translator: null,
     translatorKey: "",
+    serverTr: false,          // el servidor (NLLB) traduce al idioma elegido
+    trWait: new Map(),        // nº de frase → frase que espera su traducción del servidor
     segments: [],        // { src, tgt, time } finalizados, en orden
     interimSrc: "",
     interimTgt: "",
@@ -501,6 +503,7 @@
     state.translator = null;
 
     if (!("Translator" in self)) {
+      if (el.engine.value === "whisper") return;   // puede traducir el servidor (se avisa al conectar)
       showBanner("Este navegador no tiene el traductor integrado. Usa Google Chrome 138 o posterior (o Edge 148+) en un ordenador. Mientras tanto se mostrará solo la transcripción.");
       return;
     }
@@ -545,16 +548,25 @@
     if (state.interimAgain) { state.interimAgain = false; scheduleInterim(); }
   }
 
-  function commitFinal(text) {
+  function commitFinal(text, seq) {
     const src = text.trim();
     if (!src) return;
     state.generation++;
-    const seg = { src, tgt: state.translator ? null : src, time: new Date() };
+    const viaServer = state.serverTr && seq != null;
+    const seg = { src, tgt: (state.translator || viaServer) ? null : src, time: new Date() };
     state.segments.push(seg);
     state.interimSrc = "";
     state.interimTgt = "";
     render();
-    if (state.translator) {
+    if (viaServer) {
+      // La traducción llega aparte con el mismo número. Si tarda demasiado, plan B.
+      seg.trTimer = setTimeout(() => {
+        if (!state.trWait.has(seq)) return;
+        state.trWait.delete(seq);
+        fallbackTranslate(seg);
+      }, 8000);
+      state.trWait.set(seq, seg);
+    } else if (state.translator) {
       translate(src)
         .then((out) => { seg.tgt = out ?? src; seg.words = null; })
         .catch(() => { seg.tgt = "⚠ " + src; })
@@ -562,6 +574,25 @@
     } else {
       queueIdea(src, "");
     }
+  }
+
+  // Traducción que manda el servidor (NLLB): {seq, tr:{es:…}}
+  function applyServerTranslation(m) {
+    const seg = state.trWait.get(m.seq);
+    if (!seg) return;
+    state.trWait.delete(m.seq);
+    clearTimeout(seg.trTimer);
+    const out = m.tr && m.tr[trCode(el.tgt.value)];
+    if (!out) { fallbackTranslate(seg); return; }
+    seg.tgt = out; seg.words = null;
+    render(); queueIdea(seg.src, out);
+  }
+  function fallbackTranslate(seg) {
+    if (!state.translator) { seg.tgt = seg.src; seg.words = null; render(); queueIdea(seg.src, ""); return; }
+    translate(seg.src)
+      .then((out) => { seg.tgt = out ?? seg.src; seg.words = null; })
+      .catch(() => { seg.tgt = "⚠ " + seg.src; })
+      .finally(() => { render(); queueIdea(seg.src, seg.tgt && !seg.tgt.startsWith("⚠") ? seg.tgt : ""); });
   }
 
   // ---------- modo idea (LLM local vía el servidor) ----------
@@ -701,6 +732,7 @@
       throw new Error(`No se puede conectar con el servidor Whisper (${url}): ${err.message}. ¿Está arrancado?`);
     });
     state.ws = ws;
+    state.serverTr = false;       // se confirma con «config_ok»
     sendTrainingConfig();
     ws.onmessage = (e) => {
       let m; try { m = JSON.parse(e.data); } catch { return; }
@@ -713,7 +745,15 @@
         if (!state.interimSrc) state.interimTgt = "";
         render(); scheduleInterim();
       } else if (m.type === "final") {
-        commitFinal(m.text || "");
+        commitFinal(m.text || "", m.seq);
+      } else if (m.type === "translation") {
+        applyServerTranslation(m);
+      } else if (m.type === "config_ok") {
+        const tgt = trCode(el.tgt.value);
+        state.serverTr = (m.translate || []).includes(tgt);
+        if (state.serverTr) setStatus("live", `Escuchando · traduce el servidor (${m.engine})`);
+        else if (!state.translator && trCode(el.src.value) !== tgt)
+          showBanner("Sin traducción: el servidor no tiene NLLB instalado (bash tools/setup_nllb.sh) y este navegador no tiene traductor integrado. Se muestra solo la transcripción.");
       } else if (m.type === "status") {
         setStatus(m.level || "live", m.text);
       }
@@ -753,7 +793,9 @@
   function sendTrainingConfig() {
     const ws = state.ws;
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "config", save: el.saveTraining.checked && el.engine.value === "whisper" }));
+      const tgt = trCode(el.tgt.value);
+      ws.send(JSON.stringify({ type: "config", save: el.saveTraining.checked && el.engine.value === "whisper",
+        src: el.src.value, targets: trCode(el.src.value) !== tgt ? [tgt] : [] }));
     }
   }
   function updateSaveAvailability() {
@@ -778,7 +820,8 @@
       ws.onclose = null;
       ws.onmessage = (e) => {
         let m; try { m = JSON.parse(e.data); } catch { return; }
-        if (m.type === "final") { pending = ""; commitFinal(m.text || ""); }
+        if (m.type === "final") { pending = ""; commitFinal(m.text || "", m.seq); }
+        if (m.type === "translation") applyServerTranslation(m);
         if (m.type === "flushed") finish();
       };
       try {

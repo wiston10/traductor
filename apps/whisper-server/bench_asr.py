@@ -40,7 +40,7 @@ os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")    # sin avisos técnic
 warnings.filterwarnings("ignore")
 logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
 
-import server as S  # noqa: E402
+import asr as S  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 SR = S.SAMPLE_RATE

@@ -1,0 +1,46 @@
+# Integración continua: cada push comprueba el proyecto SIN modelos (Whisper y traductor simulados).
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pruebas:
+    name: Pruebas (servidor + páginas)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Sintaxis de las páginas
+        run: node tools/check_web.mjs
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Dependencias mínimas
+        working-directory: apps/whisper-server
+        run: pip install -r requirements-test.txt
+      - name: Pruebas del servidor
+        working-directory: apps/whisper-server
+        run: python run_tests.py
+      - name: Auditoría de dependencias (vulnerabilidades conocidas)
+        working-directory: apps/whisper-server
+        run: |
+          pip install pip-audit
+          pip-audit --no-deps --disable-pip -r requirements.txt -r requirements-test.txt
+
+  secretos:
+    name: Escaneo de secretos
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

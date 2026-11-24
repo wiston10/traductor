@@ -1,25 +1,19 @@
 {
   "name": "traductor-live",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "workspaces": [
-    "apps/mobile",
-    "packages/*"
-  ],
   "scripts": {
     "start": "cd apps/whisper-server && .venv/bin/python server.py",
+    "start:mock": "cd apps/whisper-server && .venv/bin/python server.py --engine mock",
     "setup:mlx": "bash tools/convert_to_mlx.sh",
+    "setup:nllb": "bash tools/setup_nllb.sh",
     "bench": "cd apps/whisper-server && .venv/bin/python bench_asr.py",
-    "test:server": "cd apps/whisper-server && .venv/bin/python test_server.py",
-    "dev:mobile": "npm run start -w @traductor/mobile",
-    "typecheck": "npm run typecheck --workspaces --if-present",
-    "lint": "npm run lint --workspaces --if-present",
-    "test": "npx tsx --test tests/**/*.test.ts"
+    "bench:mt": "cd apps/whisper-server && .venv/bin/python bench_mt.py",
+    "evaluate": "cd apps/whisper-server && .venv/bin/python evaluate.py",
+    "test": "node tools/check_web.mjs && cd apps/whisper-server && .venv/bin/python run_tests.py",
+    "test:server": "cd apps/whisper-server && .venv/bin/python run_tests.py"
   },
   "engines": {
     "node": ">=22"
-  },
-  "dependencies": {
-    "expo": "~57.0.22"
   }
 }

@@ -6,9 +6,15 @@ Mide cuánto acierta Whisper, usando las frases corregidas a mano.
       Acierto EN DIRECTO: compara lo que Whisper escribió durante el culto con la corrección.
       No carga el modelo: tarda un segundo.
 
-  python3 evaluate.py --model <modelo HF> [--vocab]
+  python3 evaluate.py --model <modelo HF> [--vocab] [--beam 3] [--context confirmed] [--gate-db -45]
       Vuelve a transcribir las frases de las sesiones de PRUEBA con ese modelo/ajustes y
-      compara. Sirve para decidir si un modelo nuevo, un modelo entrenado o --vocab es mejor.
+      compara. Sirve para decidir si un modelo nuevo, un modelo entrenado, --vocab, beam
+      o el contexto son mejores. Muestra también el tiempo medio por frase.
+      «--model suizo» = el modelo por defecto.
+
+  python3 evaluate.py --sugerir-dialecto
+      Lista las palabras que Whisper escribió y tú corregiste siempre igual
+      (p. ej. «nöd» → «nicht»). Revísalas y copia las buenas a vocab/dialecto-de.json.
 
 Resultado: porcentaje de error de palabras (WER). Más bajo = mejor.
 """
@@ -16,6 +22,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import difflib
+import json
+import time
 import wave
 from collections import Counter
 from pathlib import Path
@@ -50,6 +59,17 @@ def missed_words(pairs) -> Counter:
     return c
 
 
+def dialect_candidates(pairs, min_count: int = 2) -> list[tuple[str, str, int]]:
+    """Sustituciones de UNA palabra que se repiten entre lo transcrito y la corrección."""
+    c: Counter = Counter()
+    for ref, hyp in pairs:
+        r, h = store.normalize(ref), store.normalize(hyp)
+        for op, i1, i2, j1, j2 in difflib.SequenceMatcher(a=h, b=r, autojunk=False).get_opcodes():
+            if op == "replace" and i2 - i1 == 1 and j2 - j1 == 1 and h[i1] != r[j1]:
+                c[(h[i1], r[j1])] += 1
+    return [(a, b, n) for (a, b), n in c.most_common() if n >= min_count]
+
+
 def report(title: str, rows: list[tuple[str, str, str]]) -> None:
     """rows = (sesión, referencia, transcripción)"""
     if not rows:
@@ -79,12 +99,38 @@ def main() -> None:
     ap.add_argument("--data-dir", default=str(HERE / "training-data"))
     ap.add_argument("--model", help="Volver a transcribir las sesiones de prueba con este modelo")
     ap.add_argument("--vocab", nargs="?", const=str(HERE / "vocab" / "de.txt"), default="")
-    ap.add_argument("--engine", choices=("torch", "mlx"), default="torch", help="Motor para --model")
+    ap.add_argument("--engine", choices=("torch", "mlx", "mock"), default="torch", help="Motor para --model (mock = simulado)")
     ap.add_argument("--audio-ctx", choices=("full", "auto"), default="full",
                     help="Solo MLX: auto = contexto corto (más rápido, experimental)")
+    ap.add_argument("--beam", type=int, default=1, help="Búsqueda amplia (1 = la más rápida)")
+    ap.add_argument("--context", choices=("none", "confirmed"), default="none",
+                    help="confirmed = dar como contexto la frase anterior (como en directo)")
+    ap.add_argument("--gate-db", type=float, default=None,
+                    help="Simular la puerta de volumen: frases más flojas cuentan como no transcritas")
+    ap.add_argument("--sugerir-dialecto", action="store_true",
+                    help="Proponer palabras de dialecto → alemán estándar a partir de las correcciones")
     ap.add_argument("--csv", help="Guardar el detalle frase a frase en este CSV")
     args = ap.parse_args()
     root = Path(args.data_dir)
+    if args.model == "suizo":
+        from asr import DEFAULT_MODEL
+        args.model = DEFAULT_MODEL
+
+    if args.sugerir_dialecto:
+        pairs = [(seg["text"], seg["auto_text"]) for _s, _d, seg in done_segments(root, None)]
+        cands = dialect_candidates(pairs)
+        if not cands:
+            print("Aún no hay sustituciones repetidas (hacen falta más frases corregidas).")
+            return
+        print("Whisper escribió → tú corregiste (veces). Revisa cada una: solo dialecto, no nombres:")
+        for a, b, n in cands[:40]:
+            print(f"  {a:>18} → {b:<18} ({n})")
+        out = HERE / "vocab" / "dialecto-sugerencias.json"
+        out.write_text(json.dumps({"note": "SUGERENCIAS sin revisar. Copia a dialecto-de.json solo las buenas.",
+                                   "mappings": {a: b for a, b, _n in cands[:40]}},
+                                  ensure_ascii=False, indent=1), encoding="utf-8")
+        print(f"\nGuardadas en {out} (no se usan hasta que las copies a dialecto-de.json).")
+        return
 
     live = [(s["id"], seg["text"], seg["auto_text"]) for s, _d, seg in done_segments(root, None)]
     report("ACIERTO EN DIRECTO (todas las sesiones corregidas)", live)
@@ -93,18 +139,41 @@ def main() -> None:
 
     rows = test_live
     if args.model:
-        from server import make_transcriber  # carga el motor solo si hace falta
+        from asr import make_transcriber, should_drop  # carga el motor solo si hace falta
+        from segmenter import level_db
         vocab = " ".join(Path(args.vocab).read_text(encoding="utf-8").split()) if args.vocab else ""
-        tr = make_transcriber(args.engine, args.model, None, "de", vocab, args.audio_ctx)
+        tr = make_transcriber(args.engine, args.model, None, "de", vocab, args.audio_ctx, args.beam, args.context)
         rows = []
-        segs = list(done_segments(root, "test"))
+        segs = sorted(done_segments(root, "test"), key=lambda x: (x[0]["id"], x[2]["id"]))
+        spent, gated, previous, last_sid = 0.0, 0, "", None
         for i, (s, d, seg) in enumerate(segs, 1):
-            hyp = tr._run(read_wav(d / seg["file"]))
+            if s["id"] != last_sid:
+                previous, last_sid = "", s["id"]          # el contexto no cruza de un culto a otro
+            audio = read_wav(d / seg["file"])
+            if args.gate_db is not None and level_db(audio) < args.gate_db:
+                gated += 1
+                hyp = ""
+            else:
+                t0 = time.monotonic()
+                hyp = tr._run(audio, True, previous)
+                spent += time.monotonic() - t0
+                if should_drop(hyp, tr.prompt_text):
+                    hyp = ""
+            previous = hyp or previous
             rows.append((s["id"], seg["text"], hyp))
             print(f"\r  transcribiendo {i}/{len(segs)}…", end="", flush=True)
         print()
-        corto = " · contexto corto" if args.audio_ctx == "auto" else ""
-        report(f"MODELO {args.model} [{args.engine}{corto}]{' + vocab' if vocab else ''} (sesiones de prueba)", rows)
+        extras = [x for x in (
+            "contexto corto" if args.audio_ctx == "auto" else "",
+            "vocab" if vocab else "",
+            f"beam {args.beam}" if args.beam > 1 else "",
+            "contexto frase anterior" if args.context == "confirmed" else "",
+            f"puerta {args.gate_db:g} dB" if args.gate_db is not None else "") if x]
+        report(f"MODELO {args.model} [{args.engine}{' · ' + ' · '.join(extras) if extras else ''}] "
+               f"(sesiones de prueba)", rows)
+        done = max(1, len(segs) - gated)
+        print(f"  Tiempo medio por frase: {spent / done:.2f} s"
+              + (f" · descartadas por la puerta de volumen: {gated}" if gated else ""))
 
     if args.csv:
         with open(args.csv, "w", newline="", encoding="utf-8") as f:

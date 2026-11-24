@@ -15,7 +15,6 @@ import asyncio
 import re
 import time
 
-import aiohttp
 
 OLLAMA = "http://127.0.0.1:11434"
 LANG_NAMES = {"de": "alemán", "fr": "francés", "en": "inglés", "es": "español", "it": "italiano", "pt": "portugués"}
@@ -135,9 +134,10 @@ class IdeaClient:
         self.base = base
         self.timeout = timeout
         self.lock = asyncio.Lock()          # una petición a la vez: no competir con Whisper
-        self._session: aiohttp.ClientSession | None = None
+        self._session = None          # aiohttp.ClientSession (se importa al usarlo)
 
-    async def _http(self) -> aiohttp.ClientSession:
+    async def _http(self):
+        import aiohttp
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.timeout))
         return self._session
